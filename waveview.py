@@ -30,8 +30,9 @@ Security: the server binds to 127.0.0.1 and every request needs a random
 token (in the printed URL, then a cookie). On a shared server other users
 cannot read the dump through it.
 
-Data is read with tools/wave2img.py's parser via tools/wavequery.py, so VCD
-and FST both work, and the condition language is the one wavequery uses.
+FST is read in place, on demand, through tools/wavesource.py: nothing is
+converted or loaded up front, so a dump of any size opens at once. VCD is
+parsed into memory. The condition language is the one wavequery uses.
 """
 
 from __future__ import annotations
@@ -334,7 +335,9 @@ class Hub:
         info = None
         if clk:
             edges = self.wave.edges(self.wave.by_name[clk])
-            if len(edges) > 1:
+            if hasattr(edges, "period"):  # a regular clock of a lazy source
+                info = {"first": edges.first, "period": edges.period, "count": len(edges), "regular": True}
+            elif len(edges) > 1:
                 period = edges[1] - edges[0]
                 regular = all(edges[i + 1] - edges[i] == period for i in range(len(edges) - 1))
                 info = {"first": edges[0], "period": period, "count": len(edges), "regular": regular}
@@ -367,75 +370,31 @@ class Hub:
             return "~" + v
         return "%x" % int(v, 2)
 
-    def tile(self, sig, level, k):
-        key = (self.gen, sig.code, sig.width, level, k)
-        hit = self.tiles.get(key)
-        if hit is not None:
-            self.tiles.move_to_end(key)
-            return hit
-        t = self._make_tile(sig, level, k)
-        self.tiles[key] = t
-        if len(self.tiles) > TILE_CACHE:
-            self.tiles.popitem(last=False)
-        return t
+    def tile_key(self, sig, level, k):
+        return (self.gen, sig.code, sig.width, level, k)
 
-    def _make_tile(self, sig, level, k):
-        """One tile: the value before it, then at most one change per
-        bucket. A bucket holding several changes becomes one change to its
-        final value plus a dense entry [start, end, records, high share].
-        A tile with no dense entry is exact: no finer level has more to show.
-        Buckets are found by bisection, so a coarse tile costs about one
-        step per non empty bucket, not one per change."""
-        w = self.wave
-        width = sig.width
-        times = w.times.get(sig.code, [])
-        values = w.values.get(sig.code, [])
-        norm = w2i.normalize
+    def make_tiles(self, sigs, level, k):
+        """Tiles of slot (level, k) for several signals in one pass over the
+        source. From the source's bucket summaries: a bucket with one change
+        is a point; with more it is a dense stretch [start, end, changes,
+        share of 1s], and neighbouring dense buckets of the same shade merge
+        (that is what keeps zoomed out tiles small). A tile without dense
+        stretches is exact: no finer level has more to show."""
         ts = k * (TILE_BUCKETS << level)
-        te = ts + (TILE_BUCKETS << level)
-        i = bisect.bisect_left(times, ts)
-        end = bisect.bisect_left(times, te, i)
-        prev = norm(values[i - 1], width) if i > 0 else "x" * width
-        v0 = prev
-        out_t, out_v, dense = [], [], []
-        last_db, last_q = None, None  # bucket and shade of the last dense entry
-        while i < end:
-            b = (times[i] - ts) >> level
-            be = ts + ((b + 1) << level)
-            j = bisect.bisect_left(times, be, i, end)
-            n = j - i
-            if n <= 64:
-                trans = []
-                for m in range(i, j):
-                    v = norm(values[m], width)
-                    if v != prev:
-                        trans.append((times[m], v))
-                        prev = v
-                if not trans:
-                    i = j
+        summ = self.wave.buckets(sigs, ts, level, TILE_BUCKETS)
+        out = {}
+        for sig in sigs:
+            v0, bks = summ[sig.code]
+            out_t, out_v, dense = [], [], []
+            last_db = last_q = None
+            for b, first, last_t, cnt, ones, last_v in bks:
+                if cnt == 1:
+                    out_t.append(first)
+                    out_v.append(last_v)
+                    last_db = None
                     continue
-                first, last_t, last_v, cnt = trans[0][0], trans[-1][0], trans[-1][1], len(trans)
-                hi = sum(1 for _, v in trans if v == "1") / cnt if width == 1 else 0
-                is_dense = cnt > 1
-            else:
-                seg = values[i:j]
-                last_v = norm(values[j - 1], width)
-                if len(set(seg)) == 1 and last_v == prev:
-                    i = j
-                    continue
-                first = next((times[m] for m in range(i, j) if norm(values[m], width) != prev), times[i])
-                last_t, cnt = times[j - 1], n
-                hi = seg.count("1") / n if width == 1 else 0
-                is_dense = True
-                prev = last_v
-            if not is_dense:
-                out_t.append(first)
-                out_v.append(last_v)
-                last_db = None
-            else:
-                # neighbouring dense buckets with the same shade become one
-                # entry: zoomed out this is what keeps tiles small
-                q = round(hi * 8) if width == 1 else cnt.bit_length()
+                hi = ones / cnt if sig.width == 1 else 0
+                q = round(hi * 8) if sig.width == 1 else cnt.bit_length()
                 if last_db == b - 1 and last_q == q:
                     d = dense[-1]
                     tot = d[2] + cnt
@@ -448,27 +407,46 @@ class Hub:
                     out_v.append(last_v)
                     dense.append([first, last_t, cnt, hi])
                 last_db, last_q = b, q
-            i = j
-        # wire form: times as deltas from the tile start, values compact
-        dt, last_t = [], ts
-        for t in out_t:
-            dt.append(t - last_t)
-            last_t = t
-        return {
-            "v0": self.enc(v0, width),
-            "t": dt,
-            "v": [self.enc(v, width) for v in out_v],
-            "d": [[a - ts, b - ts, n, round(h, 2)] for a, b, n, h in dense],
-            "x": 1 if not dense else 0,
-        }
+            dt, prev_t = [], ts
+            for t in out_t:
+                dt.append(t - prev_t)
+                prev_t = t
+            out[sig.code] = {
+                "v0": self.enc(v0, sig.width),
+                "t": dt,
+                "v": [self.enc(v, sig.width) for v in out_v],
+                "d": [[a - ts, b - ts, n, round(h, 2)] for a, b, n, h in dense],
+                "x": 1 if not dense else 0,
+            }
+        return out
 
     def tiles_for(self, level, want):
+        """Requested tiles, from the cache or made in one source pass per
+        slot for all the signals that miss."""
+        by_k = {}
         out = {}
         for name, ks in want.items():
             sig = self.wave.by_name.get(name)
             if sig is None:
                 continue
-            out[name] = {str(k): self.tile(sig, int(level), int(k)) for k in ks[:64]}
+            out[name] = {}
+            for k in ks[:64]:
+                key = self.tile_key(sig, level, int(k))
+                hit = self.tiles.get(key)
+                if hit is not None:
+                    self.tiles.move_to_end(key)
+                    out[name][str(k)] = hit
+                else:
+                    by_k.setdefault(int(k), []).append(sig)
+        for k, sigs in by_k.items():
+            uniq = list({s.code: s for s in sigs}.values())
+            made = self.make_tiles(uniq, level, k)
+            for sig in sigs:
+                t = made[sig.code]
+                self.tiles[self.tile_key(sig, level, k)] = t
+                out[sig.name][str(k)] = t
+        while len(self.tiles) > TILE_CACHE:
+            self.tiles.popitem(last=False)
         return {"L": level, "gen": self.gen, "tiles": out}
 
     # -- push ---------------------------------------------------------------
@@ -630,7 +608,7 @@ class Hub:
         else:
             hi = c
             while hi > 0 and hit is None:
-                lo = max(0, hi - 4096)
+                lo = max(0, hi - (1 << 18 if getattr(self.wave, "lazy", False) else 4096))
                 hits = list(wq.scan(expr, tl, range(lo, hi)))
                 if hits:
                     hit = hits[-1]
@@ -809,7 +787,8 @@ class Hub:
 
     def wave_data(self, names, t0, t1, px):
         """Value changes of names in [t0, t1], merged so that at most about
-        one change per pixel is sent. Merged stretches come back as dense."""
+        one change per pixel is sent. Merged stretches come back as dense.
+        (The UI uses tiles; this stays for scripts.)"""
         w = self.wave
         px = max(16, min(int(px), 20000))
         bw = max((t1 - t0) / px, 1e-9)
@@ -818,20 +797,14 @@ class Hub:
             sig = w.by_name.get(n)
             if sig is None:
                 continue
-            times = w.times.get(sig.code, [])
-            values = w.values.get(sig.code, [])
-            i = bisect.bisect_right(times, t0)
-            j = bisect.bisect_right(times, t1)
             v0 = w.value(sig, t0)
             ch, dense = [], []
             last_b = None
             prev = v0
-            for k in range(i, j):
-                v = w2i.normalize(values[k], sig.width)
-                if v == prev:  # a rewrite of the same value is not an edge
+            for t, v in w.changes(sig, t0, t1):
+                if t <= t0 or v == prev:
                     continue
                 prev = v
-                t = times[k]
                 b = int((t - t0) / bw)
                 if b == last_b and ch:
                     ch[-1][1] = v
@@ -843,16 +816,8 @@ class Hub:
                     ch.append([t, v])
                     last_b = b
             out[n] = {"w": sig.width, "v0": v0, "ch": ch, "dense": dense}
-        tl = self.timeline()
-        edges = None
-        first = None
-        if tl.edges:
-            lo = bisect.bisect_left(tl.edges, t0)
-            hi = bisect.bisect_right(tl.edges, t1)
-            if hi - lo <= 4000:
-                edges = tl.edges[lo:hi]
-                first = lo
-        return {"t0": t0, "t1": t1, "signals": out, "edges": edges, "edge0": first, "gen": self.gen}
+        e = self.edges_in(t0, t1)
+        return {"t0": t0, "t1": t1, "signals": out, "edges": e["edges"], "edge0": e["edge0"], "gen": self.gen}
 
     def values_at(self, names, t):
         w = self.wave
@@ -860,31 +825,12 @@ class Hub:
         return {
             "time": t,
             "cycle": tl.cycle_of(t) if tl.edges else None,
-            "values": {n: w.value(w.by_name[n], t) for n in names if n in w.by_name},
+            "values": w.values_at([w.by_name[n] for n in names if n in w.by_name], t),
         }
 
     def next_edge(self, name, t, direction):
         """Time of the next / previous real value change of a signal."""
-        w = self.wave
-        sig = w.resolve(name)
-        times = w.times.get(sig.code, [])
-        values = w.values.get(sig.code, [])
-        norm = lambda k: w2i.normalize(values[k], sig.width)  # noqa: E731
-        if direction == "next":
-            cur = w.value(sig, t)
-            for k in range(bisect.bisect_right(times, t), len(times)):
-                if norm(k) != cur:
-                    return times[k]
-            return None
-        # the start of the run of equal values that ends just before t; the
-        # very first record is the initial value, not an edge
-        k = bisect.bisect_left(times, t) - 1
-        if k < 0:
-            return None
-        v = norm(k)
-        while k > 0 and norm(k - 1) == v:
-            k -= 1
-        return times[k] if k > 0 else None
+        return self.wave.next_change(self.wave.resolve(name), t, direction)
 
     def snapshot(self, table=False, radix="hex", max_rows=60):
         st = self.state
@@ -952,7 +898,8 @@ class Hub:
                 last_seen = None
                 continue
             with self.lock:
-                self.wave = wave
+                old, self.wave = self.wave, wave
+                old.close()
                 self.mtime = st.st_mtime_ns
                 self.gen += 1
                 self._fix_state()

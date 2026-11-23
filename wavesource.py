@@ -1,0 +1,331 @@
+"""Lazy waveform sources: dumps that are never loaded as a whole.
+
+LazyFst talks to tools/fstsrv.c, a helper process that opens an FST, sends
+the hierarchy and then answers reads for chosen signals over chosen time
+windows. Nothing is converted and nothing is read until a view, a query or
+a value at the cursor needs it, so the size of the dump does not matter:
+opening costs the hierarchy, a view costs the blocks it overlaps.
+
+It offers the same interface as wavequery.Wave (the in-memory reader used
+for VCD), which is what wavequery and waveview program against:
+
+    signals, by_name, timescale, start_time, end_time
+    resolve() select()                    names (inherited)
+    value(sig, t)  values_at(sigs, t)     value held at t (after changes at t)
+    changes(sig, t0, t1)                  [(t, bits)] real changes in [t0, t1]
+    next_change(sig, t, "next"|"prev")
+    buckets(sigs, ts, level, n)           per bucket summaries, for tiles
+    edges(clock)                          rising edges (arithmetic when regular)
+    clock_candidates() change_count(sig)
+
+Values are fetched in aligned chunks and cached, so stepping through cycles
+(find, table) costs one read per chunk per signal, not one per cycle.
+"""
+
+from __future__ import annotations
+
+import bisect
+import collections
+import os
+import subprocess
+import sys
+import threading
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import wave2img as w2i  # noqa: E402
+import wavequery as wq  # noqa: E402
+
+CHUNK_CACHE = 4096  # (signal, chunk) entries
+
+
+class ArithEdges:
+    """The rising edges of a regular clock, as a sequence: first + k*period.
+    Works with len(), indexing, slicing and bisect like a list."""
+
+    def __init__(self, first, period, count):
+        self.first, self.period, self.count = first, period, count
+
+    def __len__(self):
+        return self.count
+
+    def __getitem__(self, k):
+        if isinstance(k, slice):
+            return [self[i] for i in range(*k.indices(self.count))]
+        if k < 0:
+            k += self.count
+        if not 0 <= k < self.count:
+            raise IndexError(k)
+        return self.first + k * self.period
+
+    def __iter__(self):
+        return (self.first + k * self.period for k in range(self.count))
+
+
+class LazyFst(wq.Wave):
+    lazy = True
+
+    def __init__(self, path):
+        binary = w2i.build_fst_tool("fstsrv", verbose=True)
+        if binary is None:
+            raise wq.QueryError("cannot build tools/fstsrv.c (needs a C compiler and Verilator's FST library)")
+        self.path = path
+        self.proc = subprocess.Popen([binary, path], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     text=True, bufsize=1 << 16)
+        self.io = threading.Lock()
+        head = self.proc.stdout.readline().strip()
+        if head != "wavesrv 1":
+            raise wq.QueryError("fstsrv could not open %s: %s" % (path, head))
+        dump = w2i.Dump()
+        exp = 0
+        width_of = {}
+        for line in self.proc.stdout:
+            line = line.rstrip("\n")
+            if line == "end":
+                break
+            kind, _, rest = line.partition(" ")
+            if kind == "timescale":
+                exp = int(rest)
+            elif kind == "range":
+                a, b = rest.split()
+                dump.start_time, dump.end_time = int(a), int(b)
+            elif kind == "var":
+                h, w, name = rest.split(" ", 2)
+                h, w = int(h), int(w)
+                width_of[h] = w
+                dump.signals.append(w2i.Signal(name, w, h, len(dump.signals)))
+        dump.timescale = _timescale(exp)
+        if dump.end_time <= dump.start_time:
+            dump.end_time = dump.start_time + 1
+        super().__init__(dump)
+        self.width_of = width_of
+        span = max(1, (self.end_time - self.start_time) // 65536)
+        self.chunk = 1 << max(10, span.bit_length())
+        self.cache = collections.OrderedDict()  # (code, k) -> (prior, times, values)
+
+    def close(self):
+        try:
+            with self.io:
+                self.proc.stdin.write("quit\n")
+                self.proc.stdin.flush()
+        except (OSError, ValueError):
+            pass
+        self.proc.wait(timeout=5)
+
+    def __del__(self):
+        try:
+            if self.proc.poll() is None:
+                self.proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
+
+    # -- protocol -------------------------------------------------------------
+
+    def _ask(self, cmd):
+        with self.io:
+            self.proc.stdin.write(cmd + "\n")
+            self.proc.stdin.flush()
+            out = []
+            for line in self.proc.stdout:
+                line = line.rstrip("\n")
+                if line == ".":
+                    return out
+                if line.startswith("!"):
+                    raise wq.QueryError("fstsrv: " + line[1:].strip())
+                out.append(line)
+            raise wq.QueryError("fstsrv stopped (dump %s)" % self.path)
+
+    def _read(self, codes, t0, t1):
+        """{code: (prior, [times], [values])} for [t0, t1]."""
+        out = {c: [("x" * self.width_of.get(c, 1)), [], []] for c in codes}
+        if not codes:
+            return out
+        for line in self._ask("read %d %d %s" % (t0, t1, " ".join(str(c) for c in codes))):
+            if line[0] == "c":
+                _, t, h, v = line.split(" ")
+                e = out[int(h)]
+                e[1].append(int(t))
+                e[2].append(v)
+            elif line[0] == "p":
+                _, h, v = line.split(" ")
+                out[int(h)][0] = v
+        return out
+
+    # -- chunk cache ----------------------------------------------------------
+
+    def _chunks(self, sigs, k0, k1):
+        """Make sure chunks k0..k1 of these signals are cached."""
+        codes = sorted({s.code for s in sigs})
+        missing = [c for c in codes if any((c, k) not in self.cache for k in range(k0, k1 + 1))]
+        if not missing:
+            for c in codes:
+                for k in range(k0, k1 + 1):
+                    self.cache.move_to_end((c, k))
+            return
+        cs = self.chunk
+        data = self._read(missing, k0 * cs, (k1 + 1) * cs - 1)
+        for c, (prior, times, values) in data.items():
+            i = 0
+            for k in range(k0, k1 + 1):
+                end = (k + 1) * cs
+                j = bisect.bisect_left(times, end, i)
+                self.cache[(c, k)] = (prior, times[i:j], values[i:j])
+                if j > i:
+                    prior = values[j - 1]
+                i = j
+        while len(self.cache) > CHUNK_CACHE:
+            self.cache.popitem(last=False)
+
+    def _chunk(self, sig, t):
+        k = max(0, int(t)) // self.chunk
+        if (sig.code, k) not in self.cache:
+            # read ahead: stepping through time is the common pattern
+            self._chunks([sig], k, k + 3)
+        else:
+            self.cache.move_to_end((sig.code, k))
+        return self.cache[(sig.code, k)]
+
+    # -- the Wave interface ---------------------------------------------------
+
+    def value(self, sig, t):
+        prior, times, values = self._chunk(sig, t)
+        i = bisect.bisect_right(times, t) - 1
+        return w2i.normalize(values[i] if i >= 0 else prior, sig.width)
+
+    def values_at(self, sigs, t):
+        """Values of many signals at t in one round trip."""
+        k = max(0, int(t)) // self.chunk
+        need = [s for s in sigs if (s.code, k) not in self.cache]
+        if need:
+            self._chunks(need, k, k)
+        return {s.name: self.value(s, t) for s in sigs}
+
+    def changes(self, sig, t0, t1):
+        t0, t1 = int(max(t0, 0)), int(t1)
+        k0, k1 = t0 // self.chunk, t1 // self.chunk
+        if k1 - k0 > 256:  # a long window: read it without filling the cache
+            prior, times, values = self._read([sig.code], t0, t1)[sig.code]
+            return [(t, w2i.normalize(v, sig.width)) for t, v in zip(times, values)]
+        self._chunks([sig], k0, k1)
+        out = []
+        for k in range(k0, k1 + 1):
+            _, times, values = self.cache[(sig.code, k)]
+            for t, v in zip(times, values):
+                if t0 <= t <= t1:
+                    out.append((t, w2i.normalize(v, sig.width)))
+        return out
+
+    def next_change(self, sig, t, direction):
+        cur = self.value(sig, t)
+        if direction == "next":
+            lo, span = int(t) + 1, self.chunk
+            while lo <= self.end_time:
+                for tt, v in self.changes(sig, lo, lo + span - 1):
+                    if v != cur:
+                        return tt
+                lo += span
+                span *= 4
+            return None
+        # backwards: the start of the run of values equal to the one just before t
+        before = self.value(sig, t - 1) if t > self.start_time else None
+        if before is None:
+            return None
+        hi, span = int(t) - 1, self.chunk
+        while hi >= self.start_time:
+            lo = max(self.start_time, hi - span + 1)
+            ch = self.changes(sig, lo, hi)
+            for k in range(len(ch) - 1, -1, -1):
+                tt, v = ch[k]
+                prev = ch[k - 1][1] if k > 0 else self.value(sig, lo - 1) if lo > self.start_time else None
+                if v == before and prev != before:
+                    return tt if prev is not None else None
+            hi = lo - 1
+            span *= 4
+        return None
+
+    def buckets(self, sigs, ts, level, n):
+        codes = sorted({s.code for s in sigs})
+        res = {c: ["x" * self.width_of.get(c, 1), []] for c in codes}
+        if codes:
+            for line in self._ask("agg %d %d %d %s" % (ts, level, n, " ".join(str(c) for c in codes))):
+                f = line.split(" ")
+                if f[0] == "b":
+                    res[int(f[1])][1].append((int(f[2]), int(f[3]), int(f[4]), int(f[5]), int(f[6]), f[7]))
+                elif f[0] == "p":
+                    res[int(f[1])][0] = f[2]
+        return {s.code: (w2i.normalize(res[s.code][0], s.width),
+                         [(b, a, z, cnt, one, w2i.normalize(v, s.width)) for b, a, z, cnt, one, v in res[s.code][1]])
+                for s in sigs}
+
+    def change_count(self, sig):
+        return None  # unknown without reading the whole signal
+
+    def edges(self, sig):
+        if sig.code in self._edges:
+            return self._edges[sig.code]
+        self._edges[sig.code] = e = self._find_edges(sig)
+        return e
+
+    def _rising(self, sig, t0, t1):
+        prev = self.value(sig, t0 - 1) if t0 > self.start_time else None
+        out = []
+        for t, v in self.changes(sig, t0, t1):
+            if v == "1" and prev != "1":
+                out.append(t)
+            prev = v
+        return out
+
+    def _find_edges(self, sig):
+        """Rising edges. A clock whose first edges are evenly spaced and whose
+        last edges sit on the same grid is taken as regular and described
+        arithmetically; anything else is read in full."""
+        start, end = self.start_time, self.end_time
+        span = self.chunk
+        while True:  # widen the window until it holds 64 edges or the dump
+            first = self._rising(sig, start, min(end, start + span))
+            if len(first) >= 64 or start + span >= end:
+                break
+            span *= 4
+        if len(first) >= 3:
+            p = first[1] - first[0]
+            if p > 0 and all(first[i + 1] - first[i] == p for i in range(len(first) - 1)):
+                count = (end - first[0]) // p + 1
+                tail0 = max(first[0], first[0] + (count - 64) * p)
+                tail = self._rising(sig, tail0, end)
+                if tail and all((t - first[0]) % p == 0 for t in tail) and tail[-1] == first[0] + (count - 1) * p:
+                    return ArithEdges(first[0], p, count)
+                if tail and all((t - first[0]) % p == 0 for t in tail):
+                    return ArithEdges(first[0], p, (tail[-1] - first[0]) // p + 1)
+        if len(first) < 64 and start + span >= end:
+            return first
+        sys.stderr.write("wavesource: %s is not a regular clock, reading all of its edges\n" % sig.name)
+        return self._rising(sig, start, end)
+
+    def clock_candidates(self):
+        by_code = {}
+        for s in self.signals:
+            if s.width != 1:
+                continue
+            leaf = s.name.split(".")[-1].lower()
+            if "clk" in leaf or "clock" in leaf:
+                if s.code not in by_code or len(s.name) < len(by_code[s.code].name):
+                    by_code[s.code] = s
+        cands = sorted(by_code.values(), key=lambda s: len(s.name))[:6]
+        out = [(len(self.edges(s)), s) for s in cands]
+        out.sort(key=lambda c: (-c[0], len(c[1].name)))
+        return out
+
+
+def _timescale(exp):
+    units = {0: "s", -3: "ms", -6: "us", -9: "ns", -12: "ps", -15: "fs"}
+    for base, unit in units.items():
+        if base - 3 < exp <= base:
+            return "%d%s" % (10 ** (exp - base), unit)
+    return "1e%ds" % exp
+
+
+def open_lazy(path):
+    """A lazy source for path, or None when this format has none."""
+    if path.lower().endswith(".fst") and os.environ.get("WAVE_EAGER") != "1":
+        return LazyFst(path)
+    return None

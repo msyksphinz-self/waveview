@@ -50,8 +50,11 @@ Examples:
     tools/wavequery.py get sim.fst --cycle 1234 -s '*.pc' --format json
     tools/wavequery.py --selftest
 
-VCD and FST are read through tools/wave2img.py (same parser, same FST
-converter), so anything wave2img can draw this tool can query.
+FST is read in place and on demand (tools/wavesource.py and tools/fstsrv.c):
+opening reads only the hierarchy, and each query decompresses only the
+signals and time range it needs, so dump size does not matter. VCD (and
+FSDB through fsdb2vcd) is read into memory with tools/wave2img.py's parser.
+A search over a long range evaluates only where its signals change.
 """
 
 from __future__ import annotations
@@ -222,10 +225,89 @@ class Wave:
     def by_code(self, code):
         return self.times.get(code, []), self.values.get(code, [])
 
+    # -- the interface shared with the lazy sources (tools/wavesource.py) --
+
+    lazy = False
+
+    def values_at(self, sigs, t):
+        return {s.name: self.value(s, t) for s in sigs}
+
+    def change_count(self, sig):
+        return len(self.times.get(sig.code, []))
+
+    def close(self):
+        pass
+
+    def next_change(self, sig, t, direction):
+        """Time of the next / previous real value change."""
+        times = self.times.get(sig.code, [])
+        values = self.values.get(sig.code, [])
+        norm = lambda k: w2i.normalize(values[k], sig.width)  # noqa: E731
+        if direction == "next":
+            cur = self.value(sig, t)
+            for k in range(bisect.bisect_right(times, t), len(times)):
+                if norm(k) != cur:
+                    return times[k]
+            return None
+        # the start of the run of equal values that ends just before t; the
+        # very first record is the initial value, not an edge
+        k = bisect.bisect_left(times, t) - 1
+        if k < 0:
+            return None
+        v = norm(k)
+        while k > 0 and norm(k - 1) == v:
+            k -= 1
+        return times[k] if k > 0 else None
+
+    def buckets(self, sigs, ts, level, n):
+        """Per signal: (value before ts, [(bucket, first_t, last_t, changes,
+        changes_to_1, last_value)]) for n buckets of 2^level from ts. Only
+        real changes count; buckets are found by bisection."""
+        te = ts + (n << level)
+        out = {}
+        for sig in sigs:
+            times = self.times.get(sig.code, [])
+            values = self.values.get(sig.code, [])
+            i = bisect.bisect_left(times, ts)
+            end = bisect.bisect_left(times, te, i)
+            prev = w2i.normalize(values[i - 1], sig.width) if i > 0 else "x" * sig.width
+            v0 = prev
+            res = []
+            while i < end:
+                b = (times[i] - ts) >> level
+                j = bisect.bisect_left(times, ts + ((b + 1) << level), i, end)
+                first = last = None
+                cnt = ones = 0
+                if j - i > 64 and len(set(values[i:j])) == 1 and w2i.normalize(values[i], sig.width) == prev:
+                    i = j
+                    continue
+                for m in range(i, j):
+                    v = w2i.normalize(values[m], sig.width)
+                    if v == prev:
+                        continue
+                    if first is None:
+                        first = times[m]
+                    last = times[m]
+                    cnt += 1
+                    ones += v == "1"
+                    prev = v
+                if cnt:
+                    res.append((b, first, last, cnt, ones, prev))
+                i = j
+            out[sig.code] = (v0, res)
+        return out
+
 
 def load(path):
     if not os.path.isfile(path):
         raise QueryError("no such file: %s" % path)
+    # FST is read in place, on demand (tools/wavesource.py); WAVE_EAGER=1
+    # falls back to converting and loading it whole
+    import wavesource
+
+    lazy = wavesource.open_lazy(path)
+    if lazy is not None:
+        return lazy
     cpath = _cache_path(path)
     if os.path.isfile(cpath):
         try:
@@ -340,24 +422,28 @@ class Expr:
         self.braced = braced
         self.signals = {}  # reference text -> Signal
         self.max_lag = 1
+        self.temporal = False  # uses prev / rose / fell / changed / stable
         self._collect(self.tree)
 
     def _ref(self, node):
-        """Signal reference text of a Name/Attribute chain, or None."""
-        parts = []
-        while isinstance(node, ast.Attribute):
-            parts.append(node.attr)
-            node = node.value
-        if not isinstance(node, ast.Name):
-            return None
-        parts.append(self.braced.get(node.id, node.id))
-        return ".".join(reversed(parts))
+        """Signal reference text of a Name / Attribute / constant Subscript
+        chain (core.rob.valid, arr[0].field), or None."""
+        if isinstance(node, ast.Name):
+            return self.braced.get(node.id, node.id)
+        if isinstance(node, ast.Attribute):
+            base = self._ref(node.value)
+            return base and base + "." + node.attr
+        if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant) \
+                and isinstance(node.slice.value, int):
+            base = self._ref(node.value)
+            return base and "%s[%d]" % (base, node.slice.value)
+        return None
 
     def _collect(self, node):
-        if isinstance(node, (ast.Name, ast.Attribute)):
+        if isinstance(node, (ast.Name, ast.Attribute, ast.Subscript)):
             ref = self._ref(node)
             if ref is None:
-                raise QueryError("unsupported expression part in %r" % self.text)
+                raise QueryError("unsupported expression part in %r (a variable index? use bits(s, hi, lo))" % self.text)
             if ref not in self.signals:
                 self.signals[ref] = self.wave.resolve(ref)
             return
@@ -366,6 +452,8 @@ class Expr:
                 raise QueryError(
                     "unknown function in %r; available: %s" % (self.text, ", ".join(sorted(_FUNCS)))
                 )
+            if node.func.id in ("prev", "rose", "fell", "changed", "stable"):
+                self.temporal = True
             if node.func.id == "prev" and len(node.args) == 2 and isinstance(node.args[1], ast.Constant):
                 self.max_lag = max(self.max_lag, int(node.args[1].value))
             for a in node.args:
@@ -394,7 +482,7 @@ class Expr:
         return history[lag].get(sig.code)
 
     def _ev(self, node, h, lag):
-        if isinstance(node, (ast.Name, ast.Attribute)):
+        if isinstance(node, (ast.Name, ast.Attribute, ast.Subscript)):
             return self._sig_value(node, h, lag)
         if isinstance(node, ast.Constant):
             return node.value
@@ -565,8 +653,53 @@ def time_window(args, wave, tl):
     return t0, t1
 
 
+EVENT_WINDOW = 1 << 16  # cycles per step of the event driven scan
+
+
 def scan(expr, tl, cycles):
     """Yield the cycles in `cycles` where expr holds."""
+    if getattr(tl.wave, "lazy", False) and isinstance(cycles, range) and len(cycles) > 4096 and expr.signals:
+        yield from _scan_events(expr, tl, cycles)
+        return
+    yield from _scan_cycles(expr, tl, cycles)
+
+
+def _scan_events(expr, tl, cycles):
+    """The same answer as _scan_cycles, evaluating only where it can change.
+
+    The expression reads its signals at the current cycle and at most
+    max_lag cycles back, so its value can only differ from the previous
+    cycle's at a cycle where one of its signals changed, or up to max_lag
+    cycles after one. Everywhere else it repeats. Over a long dump this
+    turns a per-cycle loop into one evaluation per change, which matters
+    when a lazy source holds millions of cycles."""
+    sigs = list({s.code: s for s in expr.signals.values()}.values())
+    wave, edges = tl.wave, tl.edges
+    lag = expr.max_lag + 1 if expr.temporal else 0
+    c = cycles.start
+    stop = cycles.stop
+    while c < stop:
+        c1 = min(stop, c + EVENT_WINDOW)
+        t_lo = edges[max(0, c - lag)]
+        t_hi = edges[c1 - 1]
+        cand = {c}
+        for s in sigs:
+            for t, _ in wave.changes(s, t_lo, t_hi):
+                k = bisect.bisect_left(edges, t)  # first cycle that sees it
+                for d in range(lag + 1):
+                    if c <= k + d < c1:
+                        cand.add(k + d)
+        order = sorted(cand)
+        for i, k in enumerate(order):
+            history = [tl.sample(sigs, j) for j in range(k, max(-1, k - lag - 1), -1)]
+            if expr.evaluate(history):
+                end = order[i + 1] if i + 1 < len(order) else c1
+                for j in range(k, end):
+                    yield j
+        c = c1
+
+
+def _scan_cycles(expr, tl, cycles):
     sigs = list({s.code: s for s in expr.signals.values()}.values())
     history = []
     first = cycles.start if isinstance(cycles, range) else None
@@ -689,7 +822,8 @@ def cmd_list(args, wave, out):
             if s.name not in seen and w2i._matches(s.name, p):
                 seen.add(s.name)
                 sigs.append(s)
-    rows = [(s.name, s.width, len(wave.times.get(s.code, []))) for s in sigs]
+    rows = [(s.name, s.width, wave.change_count(s)) for s in sigs]
+    rows = [(n, w, "-" if c is None else c) for n, w, c in rows]
     shown, left = out.limit(rows)
     obj = {
         "matches": len(rows),
@@ -926,8 +1060,12 @@ def run_selftest():
 
     failures = 0
 
-    def check(label, argv, test):
+    cases = []
+
+    def check(label, argv, test, record=True):
         nonlocal failures
+        if record:
+            cases.append((label, argv, test))
         rc, text = run(argv)
         ok = False
         try:
@@ -969,6 +1107,23 @@ def run_selftest():
     ok = rc == 2 and "no signal named" in text
     print("%-4s %s" % ("ok" if ok else "FAIL", "unknown name is a clear error"))
     failures += 0 if ok else 1
+
+    # the same queries on an FST, which is read lazily (tools/wavesource.py)
+    conv = w2i.build_fst_converter(verbose=False)
+    if conv is None:
+        print("skip FST checks: the FST tools cannot be built here (needs Verilator's FST library)")
+    else:
+        import subprocess
+
+        fst = os.path.join(tmp, "selftest.fst")
+        subprocess.run([conv, "--vcd2fst", path, "-o", fst], check=True, capture_output=True)
+        for label, argv, test in cases:
+            if "cache" in label:
+                continue
+            check("fst: " + label, [fst if x == path else x for x in argv], test, record=False)
+        w = load(fst)
+        check("fst: read lazily", ["info", fst], lambda t: getattr(w, "lazy", False), record=False)
+        w.close()
 
     print("selftest: %s" % ("PASS" if failures == 0 else "%d FAILED" % failures))
     return 0 if failures == 0 else 1

@@ -308,14 +308,18 @@ def cache_dir():
 
 
 def build_fst_converter(verbose=True):
-    """Compile tools/fst2vcd_mini.c on demand. Returns the binary path or None.
+    """Compile tools/fst2vcd_mini.c on demand. Returns the binary path or None."""
+    return build_fst_tool("fst2vcd_mini", verbose)
 
-    The binary is cached and only rebuilt when the C source is newer.
-    """
-    source = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fst2vcd_mini.c")
+
+def build_fst_tool(name, verbose=True):
+    """Compile tools/<name>.c against Verilator's copy of the FST library.
+    Returns the binary path or None. The binary is cached and only rebuilt
+    when the C source is newer."""
+    source = os.path.join(os.path.dirname(os.path.abspath(__file__)), name + ".c")
     if not os.path.isfile(source):
         return None
-    binary = os.path.join(cache_dir(), "fst2vcd_mini")
+    binary = os.path.join(cache_dir(), name)
     if os.path.isfile(binary) and os.path.getmtime(binary) >= os.path.getmtime(source):
         return binary
 
@@ -525,7 +529,7 @@ def normalize(value, width):
 
 
 def is_unknown(value):
-    return any(c in "xz" for c in value)
+    return "x" in value or "z" in value
 
 
 def value_at(times, values, t, width):
