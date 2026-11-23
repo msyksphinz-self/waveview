@@ -8,6 +8,9 @@ between a person and an AI agent, built for remote development.
     waveview.py note "flush comes from the BRU mispredict here"
     waveview.py look                     what the viewer shows, as text
     waveview.py inbox --wait             wait for "Send to AI" from the UI
+    waveview.py serve --rc bug.wvrc      open a saved debug view: signals,
+                                         named cursors, arrows, comments
+    waveview.py load bug.wvrc | save bug.wvrc   (see waverc.py for the format)
 
 Why it is built this way:
 - The server runs where the dump is (the remote build machine) and needs
@@ -67,6 +70,7 @@ import wave2img as w2i  # noqa: E402
 import wavequery as wq  # noqa: E402
 import remote  # noqa: E402
 import rtlindex  # noqa: E402
+import waverc  # noqa: E402
 
 UI_DIR = os.path.join(HERE, "waveview_ui")
 DEFAULT_PORT = 8765
@@ -121,6 +125,9 @@ class Hub:
             "clock": None,
             "note": None,  # {text, source, at}
             "annotations": [],  # [{time, label, source}]
+            "cursors": [],  # named cursors [{name, time, label, color}]
+            "arrows": [],  # [{from: {signal, time}, to: {signal, time}, label, color}]
+            "comments": [],  # [{signal, time, text, color}]; signal None: on the time axis
             "source": None,  # {scope, line, signal, kind} shown in the source pane
             "last": None,  # {op, source, client, at}
         }
@@ -135,10 +142,20 @@ class Hub:
             threading.Thread(target=self.build_index, daemon=True).start()
         self.clockinfo = None
         self._restore()
+        self.rc_warnings = []
         if gtkw:
             self._load_gtkw(gtkw)
         if rc:
-            self._load_rc(rc)
+            self._fix_state()  # a clock, so that the file can count cycles
+            with open(rc, errors="replace") as fh:
+                text = fh.read()
+            if waverc.is_nwave(text):
+                self._load_rc(rc)
+            else:
+                self.rc_warnings = self.load_wvrc(text, base_dir=os.path.dirname(os.path.abspath(rc)),
+                                                  origin=os.path.basename(rc))
+                for w in self.rc_warnings:
+                    sys.stderr.write("waveview: %s\n" % w)
         self._fix_state()
         self._save_timer = None
 
@@ -150,7 +167,8 @@ class Hub:
                 saved = json.load(fh)
         except (OSError, ValueError):
             return
-        for k in ("signals", "cursor", "marker", "view", "clock", "annotations", "note"):
+        for k in ("signals", "cursor", "marker", "view", "clock", "annotations", "note",
+                  "cursors", "arrows", "comments"):
             if k in saved:
                 self.state[k] = saved[k]
 
@@ -282,6 +300,34 @@ class Hub:
             lines.append("addSignal -h 15 %s%s" % (f, path))
         lines += ['addGroup "G2"', "", "; getSignalForm Scope Hierarchy Status", "; active file of getSignalForm"]
         return "\n".join(lines) + "\n"
+
+    # -- waveview rc (.wvrc) ----------------------------------------------------
+
+    def load_wvrc(self, text, merge=False, base_dir=".", origin="rc"):
+        """Apply a .wvrc. Without merge the file replaces the view: named
+        cursors, arrows, comments, labels and the note, and the signal list
+        when the file has signal lines. Returns the warnings, one per line
+        that could not be applied."""
+        import copy
+
+        st = copy.deepcopy({k: v for k, v in self.state.items() if k != "last"})
+        if not merge:
+            st.update(cursors=[], arrows=[], comments=[], annotations=[], note=None)
+            if re.search(r"^\s*(signal|add)\s", text, re.M):
+                st["signals"] = []
+        w = self.wave
+        rd = waverc.Reader(w, lambda: wq.Timeline(w, w.by_name[st["clock"]] if st.get("clock") else None),
+                           st, base_dir)
+        rd.run(text, origin)
+        if not merge:
+            rd.finish()
+        for k in ("signals", "cursor", "marker", "view", "clock", "note", "cursors", "arrows", "comments",
+                  "annotations"):
+            self.state[k] = st[k]
+        return rd.warnings
+
+    def export_wvrc(self):
+        return waverc.write(self.state, self.wave, self.timeline(), self.dump_path)
 
     def _fix_state(self):
         """Drop what the (possibly rebuilt) dump no longer has."""
@@ -531,7 +577,30 @@ class Hub:
     def op_clear(self, a):
         self.state["signals"] = []
         self.state["annotations"] = []
+        self.state["cursors"] = []
+        self.state["arrows"] = []
+        self.state["comments"] = []
         self.state["note"] = None
+
+    def op_rc(self, a):
+        """Apply .wvrc text: a whole file, or single lines with merge."""
+        warnings = self.load_wvrc(a.get("text", ""), merge=bool(a.get("merge")),
+                                  base_dir=a.get("base_dir") or ".", origin=a.get("origin") or "rc")
+        self._fix_state()
+        return {"warnings": warnings}
+
+    def op_unmark(self, a):
+        """Remove one named cursor (name), arrow or comment (kind, index)."""
+        kind = a.get("kind", "cursors")
+        if kind not in ("cursors", "arrows", "comments", "annotations"):
+            raise wq.QueryError("unknown kind %r" % kind)
+        lst = self.state[kind]
+        if a.get("all"):
+            lst.clear()
+        elif kind == "cursors" and a.get("name") is not None:
+            lst[:] = [c for c in lst if c["name"] != a["name"]]
+        elif a.get("index") is not None and 0 <= int(a["index"]) < len(lst):
+            del lst[int(a["index"])]
 
     def op_set_signals(self, a):
         sigs = [s for s in a.get("signals", []) if s.get("name") in self.wave.by_name]
@@ -910,6 +979,10 @@ class Hub:
             "selected": st["selected"],
             "note": st["note"],
             "annotations": st["annotations"],
+            "cursors": [dict(c, cycle=cyc(c["time"])) for c in st.get("cursors", [])],
+            "arrows": [dict(a, **{"from": dict(a["from"], cycle=cyc(a["from"]["time"])),
+                                  "to": dict(a["to"], cycle=cyc(a["to"]["time"]))}) for a in st.get("arrows", [])],
+            "comments": [dict(c, cycle=cyc(c["time"])) for c in st.get("comments", [])],
             "source": st.get("source"),
             "signals": [],
         }
@@ -1067,6 +1140,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 with hub.lock:
                     return self._send(200, hub.export_rc(), "text/plain",
                                       {"Content-Disposition": 'attachment; filename="waveview.rc"'})
+            if path == "/api/export.wvrc":
+                with hub.lock:
+                    return self._send(200, hub.export_wvrc(), "text/plain",
+                                      {"Content-Disposition": 'attachment; filename="waveview.wvrc"'})
             if path == "/api/export.gtkw":
                 with hub.lock:
                     return self._send(200, hub.export_gtkw(), "text/plain",
@@ -1191,6 +1268,13 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
 def cmd_serve(args):
     if args.rtl_root:
         os.environ["WAVEVIEW_RTL_ROOT"] = args.rtl_root
+    if args.dump is None:
+        if not args.rc:
+            raise wq.QueryError("serve needs a dump, or --rc FILE with a 'dump' line")
+        with open(args.rc, errors="replace") as fh:
+            args.dump = waverc.dump_of(fh.read(), os.path.dirname(os.path.abspath(args.rc)))
+        if args.dump is None:
+            raise wq.QueryError("%s has no 'dump' line; give the dump too: serve DUMP --rc %s" % (args.rc, args.rc))
     hub = Hub(args.dump, gtkw=args.gtkw, rc=args.rc, rtl=args.rtl or (["."] if not args.no_rtl else None))
     token = args.token or secrets.token_urlsafe(16)
     Handler.hub = hub
@@ -1358,6 +1442,19 @@ def print_snapshot(snap, radix="hex"):
         print("note    [%s] %s" % (snap["note"]["source"], snap["note"]["text"]))
     for a in snap["annotations"]:
         print("label   %s  %s" % (_t(a["time"]), a["label"]))
+
+    def at(p):
+        return "%s%s" % (_t(p["time"]), "" if p.get("cycle") is None else " (cycle %d)" % p["cycle"])
+
+    def on(p):
+        return (p["signal"] or "time axis") + " @ " + at(p)
+
+    for c in snap.get("cursors", []):
+        print("cursor %s  %s%s" % (c["name"], at(c), "  " + c["label"] if c.get("label") else ""))
+    for i, a in enumerate(snap.get("arrows", [])):
+        print("arrow #%d  %s -> %s%s" % (i, on(a["from"]), on(a["to"]), "  \"%s\"" % a["label"] if a.get("label") else ""))
+    for i, c in enumerate(snap.get("comments", [])):
+        print("comment #%d  %s  \"%s\"" % (i, on(c), c["text"].replace("\n", " / ")))
     if snap["selected"]:
         print("selected %s" % ", ".join(snap["selected"]))
     src = snap.get("source")
@@ -1540,6 +1637,44 @@ def run_client(args):
         sys.stdout.write(c.call("/api/export.gtkw"))
     elif args.cmd == "rc":
         sys.stdout.write(c.call("/api/export.rc"))
+    elif args.cmd == "load":
+        if not args.file and not args.lines:
+            raise wq.QueryError("load needs a file or -e LINE")
+        warnings = []
+        if args.file:
+            text = sys.stdin.read() if args.file == "-" else open(args.file, errors="replace").read()
+            base = "." if args.file == "-" else os.path.dirname(os.path.abspath(args.file))
+            r = c.cmd("rc", text=text, merge=args.merge or None, base_dir=os.path.abspath(base),
+                      origin=os.path.basename(args.file) if args.file != "-" else "stdin")
+            warnings += r["result"]["warnings"]
+        if args.lines:
+            r = c.cmd("rc", text="\n".join(args.lines), merge=True, base_dir=os.getcwd(), origin="-e")
+            warnings += r["result"]["warnings"]
+        if j:
+            print(json.dumps({"warnings": warnings}))
+        else:
+            for w in warnings:
+                print("warning: %s" % w, file=sys.stderr)
+            print("loaded%s" % (" with %d warnings" % len(warnings) if warnings else ""))
+        return 1 if warnings else 0
+    elif args.cmd == "save":
+        text = c.call("/api/export.wvrc")
+        if args.file:
+            with open(args.file, "w") as fh:
+                fh.write(text)
+            print("saved %s" % args.file)
+        else:
+            sys.stdout.write(text)
+    elif args.cmd == "unmark":
+        kind = {"cursor": "cursors", "arrow": "arrows", "comment": "comments", "label": "annotations"}[args.kind]
+        a = {"kind": kind}
+        if args.which is None:
+            a["all"] = True
+        elif args.which.isdigit():
+            a["index"] = int(args.which)
+        else:
+            a["name"] = args.which
+        show(c.cmd("unmark", **a))
     return 0
 
 
@@ -1642,6 +1777,36 @@ def run_selftest():
           and hub3.state["signals"][1]["radix"] == "sdec" and hub3.state["cursor"] == 50 and hub3.state["view"] == [10, 90])
     out_rc = hub3.export_rc()
     check("nWave .rc export", "addSignal -h 15 -2COMP -DEC /tb_wave/dut/data[15:0]" in out_rc and "cursor 50.000000" in out_rc)
+    # waveview rc: a debug view with named cursors, arrows and comments
+    wvrc = os.path.join(tmp, "dbg.wvrc")
+    with open(wvrc, "w") as fh:
+        fh.write("# debug view\ndump t.vcd\nnote 'req answered late'\nsignal clk radix=bin\nsignal req\n"
+                 "cursor A 7c color=red 'req rises'\ncursor B A+2c\ncursor A+1c\nmarker A\n"
+                 "arrow req@A -> data@B '2 cycles' color=#123456\ncomment data@B \"BEEF #here\"  # tail\n"
+                 "comment @25ns axis\ncomment nosuch@B bad\n")
+    check("wvrc: dump line relative to the file", waverc.dump_of(open(wvrc).read(), tmp) == path)
+    hub4 = Hub(path, rc=wvrc)
+    st4 = hub4.state
+    check("wvrc: signals, arrow targets added", [s["name"] for s in st4["signals"]]
+          == ["tb_wave.dut.clk", "tb_wave.dut.req", "tb_wave.dut.data"] and st4["signals"][0]["radix"] == "bin")
+    check("wvrc: named and relative cursors", [(c["name"], c["time"]) for c in st4["cursors"]] == [("A", 70), ("B", 90)]
+          and st4["cursor"] == 80 and st4["marker"] == 70 and st4["cursors"][0]["color"] == waverc.COLORS["red"])
+    check("wvrc: arrow", st4["arrows"] == [{"from": {"signal": "tb_wave.dut.req", "time": 70},
+                                            "to": {"signal": "tb_wave.dut.data", "time": 90},
+                                            "label": "2 cycles", "color": "#123456"}])
+    check("wvrc: comments, units, # inside quotes", [(c["signal"], c["time"], c["text"]) for c in st4["comments"]]
+          == [("tb_wave.dut.data", 90, "BEEF #here"), (None, 25, "axis")])
+    check("wvrc: bad line is a warning", len(hub4.rc_warnings) == 1 and ":13:" in hub4.rc_warnings[0])
+    check("wvrc: default zoom covers the marks", st4["view"][0] < 25 and st4["view"][1] > 90)
+    hub5 = Hub(path)
+    hub5.load_wvrc(hub4.export_wvrc())
+    check("wvrc: export round trip", all(hub5.state[k] == st4[k] for k in
+                                         ("signals", "cursors", "arrows", "comments", "cursor", "marker", "view")))
+    hub4.load_wvrc("comment req@B+1c more", merge=True)
+    check("wvrc: merge adds", len(hub4.state["comments"]) == 3 and hub4.state["comments"][-1]["time"] == 100
+          and len(hub4.state["arrows"]) == 1)
+    hub4.apply("unmark", {"kind": "cursors", "name": "A"})
+    check("wvrc: unmark", [c["name"] for c in hub4.state["cursors"]] == ["B"])
     # stand-in for Verdi's fsdb2vcd: <in> -o <out>
     if os.name == "nt":
         fake = os.path.join(tmp, "fsdb2vcd.cmd")
@@ -1719,12 +1884,13 @@ def build_parser():
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("serve", help="start the viewer on a dump")
-    s.add_argument("dump")
+    s.add_argument("dump", nargs="?", help="the dump (default: the 'dump' line of --rc)")
     s.add_argument("--port", type=int, default=0, help="port (default: first free from %d)" % DEFAULT_PORT)
     s.add_argument("--host", default="127.0.0.1", help="bind address (default 127.0.0.1)")
     s.add_argument("--token", help="fixed access token (default: random)")
     s.add_argument("--gtkw", help="load the signal list from a GTKWave save file")
-    s.add_argument("--rc", help="load the signal list, cursor and zoom from a Verdi nWave save file (.rc)")
+    s.add_argument("--rc", help="open on a saved view: a waveview rc (.wvrc: signals, cursors, arrows, "
+                                "comments; see waverc.py) or a Verdi nWave save file (.rc)")
     s.add_argument("--rtl", action="append",
                    help="RTL sources for the source view: a .f filelist, a file or a directory "
                         "(repeatable; default: the current directory, without vendor/)")
@@ -1784,6 +1950,18 @@ def build_parser():
     s.add_argument("--after", type=int, default=0, help="only messages with a larger id")
     sub.add_parser("gtkw", parents=[client], help="print the view as a GTKWave save file")
     sub.add_parser("rc", parents=[client], help="print the view as a Verdi nWave save file (.rc)")
+    s = sub.add_parser("load", parents=[client],
+                       help="apply a waveview rc file (.wvrc): signals, cursors, arrows, comments")
+    s.add_argument("file", nargs="?", help="the .wvrc file, or - for stdin")
+    s.add_argument("-e", dest="lines", action="append", default=[],
+                   help="apply this rc line on top of the view (repeatable), e.g. "
+                        "-e 'arrow req@10c ack@12c \"2 cycles\"'")
+    s.add_argument("--merge", action="store_true", help="add to the view instead of replacing it")
+    s = sub.add_parser("save", parents=[client], help="write the view as a waveview rc file (.wvrc)")
+    s.add_argument("file", nargs="?", help="output file (default: stdout)")
+    s = sub.add_parser("unmark", parents=[client], help="remove named cursors, arrows or comments")
+    s.add_argument("kind", choices=("cursor", "arrow", "comment", "label"))
+    s.add_argument("which", nargs="?", help="cursor name, or index (from `look`); none: all of that kind")
     s = sub.add_parser("src", parents=[client],
                        help="where a signal is declared and driven, with values at the cursor")
     s.add_argument("signal", help="dump signal (full name or unique suffix)")

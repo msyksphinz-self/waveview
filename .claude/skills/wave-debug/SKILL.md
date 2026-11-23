@@ -90,6 +90,24 @@ waveview.py inbox --wait 600            # wait for the user's "Send to AI"
   so you know which signals and which cycle they mean
 - Do not `clear` the user's signal list without being asked; add to it
 
+### Pointing at the evidence, and leaving it as a file
+
+Named cursors, arrows and comments go through waveview rc lines
+(`waverc.py` docstring has the format; times like `1230c`, `A+4c`):
+
+```sh
+waveview.py load -e 'cursor A 1230c "mispredict" color=red' \
+                 -e 'cursor B A+4c "flush"' \
+                 -e 'arrow u_bru.o_mispredict_valid@A -> u_rob.flush_valid@B "4 cycles, expected 2"' \
+                 -e 'comment u_rob.flush_valid@A+2c "should rise here"'
+waveview.py save findings.wvrc    # the whole debug view; `serve --rc findings.wvrc` reopens it
+waveview.py unmark arrow 0        # indexes come from `look`
+```
+
+When asked for a debug view of a failure without a viewer running, write the
+.wvrc by hand (dump line relative to the file) and check it with
+`waveview.py serve --rc FILE` (warnings name lines that did not apply).
+
 ## From a waveform value to the RTL that made it
 
 ```sh

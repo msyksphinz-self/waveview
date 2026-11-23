@@ -117,6 +117,60 @@ waveview.py serve sim.fsdb --rc signal.rc --rtl core/filelist.f
   書き出せる。Verdi で `File > Restore Signal` すれば同じ信号・カーソル・ズームで開く
 - wavequery / wave2img も同じ仕組みで .fsdb を読める
 
+## デバッグビューを rc ファイルで渡す (.wvrc)
+
+waveview 独自の rc ファイル (.wvrc) に「見るべき信号」「見るべきタイミング (名前付き
+カーソル)」「矢印とコメント」を書いておくと、そのファイルを渡すだけで同じデバッグ画面が
+開く。バグ報告に添付したり、AI エージェントが調べた結果をファイルで残したりできる。
+
+```sh
+waveview.py serve --rc bug123.wvrc        # ダンプは rc の dump 行から (dump を引数で渡してもよい)
+waveview.py load bug123.wvrc              # 起動中のビューワに読み込む (--merge で追加)
+waveview.py load -e 'comment flush_valid@1234c "ここ"'   # 1 行だけ追加
+waveview.py save bug123.wvrc              # 今の画面を .wvrc に保存
+waveview.py unmark arrow 0                # 矢印 #0 を消す (番号は look に出る)
+```
+
+書式 (1 行 1 コマンド、シェルと同じクォート、`#` 以降はコメント)。完全な例は
+[`docs/example.wvrc`](example.wvrc)、仕様は `waverc.py` 冒頭。
+
+```sh
+dump    ../sim/w.fst                      # rc ファイルからの相対パス。host:/path も可
+clock   tb.clk
+note    "mispredict 後の flush が 2 サイクル遅い"      # 画面上部のバナー
+
+signal  u_bru.o_mispredict_valid radix=bin   # フルネーム / 末尾一致 / グロブ
+signal  '*u_rob.commit_*'
+
+cursor  A 1230c "mispredict" color=red    # 名前付きカーソル: 名前 時刻 [ラベル] [color=]
+cursor  B A+4c  "flush"      color=green  # 他のカーソルからの相対
+cursor  B                                 # メインカーソル (引数 1 つ)
+marker  A
+zoom    A-6c B+6c                         # 省略時は書いた時刻全部が入るように自動ズーム
+
+arrow   u_bru.o_mispredict_valid@A -> u_rob.flush_valid@B "4 cycles"
+comment u_rob.flush_valid@A+2c "ここで立つはず\n(\n で改行)" color=orange
+comment @A+1c "時間軸上のコメント"
+```
+
+- 時刻: `1234c` (サイクル = クロックの立ち上がり)、`5000` (ダンプの時間単位)、
+  `12ns` `3.5us` (単位付き)、`A` `cursor` `marker` (カーソル名)、`A+3c` `B-10ns` (相対)
+- 点 (`arrow` / `comment`): `信号@時刻`、時間軸なら `@時刻`。矢印・コメントで参照した
+  信号が一覧に無ければ自動で追加する
+- 色: `red orange yellow green cyan blue purple pink white gray` または `#rrggbb`
+- 読めない行 (存在しない信号など) は警告を出してスキップし、残りは適用する
+- 読み込みは画面を置き換える (名前付きカーソル・矢印・コメント・ラベル・メモ。信号一覧は
+  ファイルに signal 行があれば置き換え)。`--merge` / `-e` は追加
+- `--rc` は Verdi nWave の .rc も受け付ける (中身で自動判別)
+
+ブラウザでは:
+
+- 波形を**右クリック** → 「Named cursor here…」「Comment on … here…」「Arrow from … here」
+  (続けて矢印の先をクリック、Esc で取り消し)。クロックエッジ近くなら時刻はエッジに吸着する
+- 既存のカーソル・矢印・コメントを右クリック → 編集 / 削除
+- `[` / `]` で前 / 次の名前付きカーソルへジャンプ
+- ツールバーの `.wvrc` で保存、`Load rc` で .wvrc (または nWave .rc) を読み込み
+
 ## Windows (手元の PC) からリモートの FST を見る
 
 ビューワを手元の Windows で動かし、FST はビルドサーバに置いたまま読む。
@@ -258,6 +312,8 @@ waveview.py annotate --cycle 1230 "mispredict"
 waveview.py note "flush は 1230 の BRU mispredict が原因"
 waveview.py find 'rose(flush_valid)'
 waveview.py inbox --wait 600   # ユーザーの「Send to AI」を待つ
+waveview.py load -e 'cursor A 1230c "mispredict"' -e 'arrow mispredict@A -> flush_valid@A+4c "原因"'
+waveview.py save findings.wvrc # 調べた結果を rc ファイルとして残す
 ```
 
 - エージェントの操作は即座にブラウザに反映され、ステータスバーに `agent: goto` のように出る

@@ -1,0 +1,30 @@
+# waveview rc: a debug view to hand to someone (or to an AI agent).
+#   waveview.py serve --rc docs/example.wvrc     # opens the dump named below
+#   waveview.py load  docs/example.wvrc          # into a viewer that is already running
+# One command per line, shell-style quoting, '#' starts a comment.
+
+dump    ../sim/w.fst                     # relative to this file; host:/path works too
+clock   tb_scariv_top.clk
+note    "ROB flush is one cycle late after a BRU mispredict"
+
+# signals: full name, unique suffix or glob; radix=hex|dec|sdec|bin|oct
+signal  u_bru.o_mispredict_valid  radix=bin
+signal  '*u_rob.commit_*'
+signal  u_rob.flush_valid         radix=bin
+signal  u_rob.r_rob_head          radix=dec
+
+# named cursors: NAME TIME [label] [color=..]. Times: 1234c (cycle), 5000
+# (dump units), 12ns, or relative to a cursor: A+2c, B-10ns
+cursor  A  1230c  "mispredict"   color=red
+cursor  B  A+4c   "flush"        color=green
+cursor  E  A+2c   "flush expected here" color=yellow
+cursor  B                        # the main cursor (one argument)
+marker  A
+zoom    A-6c B+6c                # without zoom: everything above, with a margin
+
+# arrows from one transition to another: SIGNAL@TIME -> SIGNAL@TIME [label]
+arrow   u_bru.o_mispredict_valid@A -> u_rob.flush_valid@B "4 cycles, should be 2"
+# comments on a signal (SIGNAL@TIME) or on the time axis (@TIME); \n breaks a line
+comment u_rob.flush_valid@E   "flush_valid should rise here\nheld off by commit stall?" color=orange
+comment u_rob.r_rob_head@B    "head is already past the branch"
+comment @A+1c "redirect sent"
