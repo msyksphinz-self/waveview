@@ -25,6 +25,9 @@
   <button id="b-ask" class="primary" title="Send the current view and a message to the AI agent">Send to AI</button>
   <a id="b-gtkw" class="btn" href="/api/export.gtkw" title="Save the signal list as a GTKWave save file">.gtkw</a>
   <a id="b-rc" class="btn" href="/api/export.rc" title="Save the signal list, cursor and zoom as a Verdi nWave save file">.rc</a>
+  <a id="b-wvrc" class="btn" href="/api/export.wvrc" title="Save the debug view as a waveview rc: signals, cursors, arrows and comments">.wvrc</a>
+  <button id="b-load" title="Open a waveview rc (.wvrc) or Verdi .rc" onclick="document.getElementById('rcfile').click()">Load rc</button>
+  <input type="file" id="rcfile" accept=".wvrc,.rc,.txt" hidden>
   <button id="b-theme" title="Light / dark">◐</button>
   <button id="b-help" title="Keyboard shortcuts (?)">?</button>
 </div>
@@ -96,7 +99,8 @@
       <tr><th>a</th><td>Send to AI</td><th>Esc</th><td>Clear selection, close menus</td></tr>
       <tr><th>Double-click row</th><td>Trace drivers in the source</td><th>S</th><td>Show / hide the source pane</td></tr>
       <tr><th>Source: double-click</th><td>Drivers (Shift: loads); instance: go in</td><th>Source: Ctrl+click</th><td>Add the signal to the waveform</td></tr>
-      <tr><th>Alt+← / →</th><td>Source history back / forward</td><th></th><td></td></tr>
+      <tr><th>Alt+← / →</th><td>Source history back / forward</td><th>[ / ]</th><td>Previous / next named cursor</td></tr>
+      <tr><th>Right-click wave</th><td>Named cursor, comment, arrow here; edit / remove one</td><th>Load rc / .wvrc</th><td>Open / save a debug view file</td></tr>
     </table>
     <p class="dim">Signals: double-click in the signal list or drag them onto the wave rows. Drag rows to reorder. Right-click a row for radix and more.</p>
     <div class="dlgbtns"><button value="ok" class="primary">Close</button></div>

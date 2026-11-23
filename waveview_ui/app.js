@@ -25,6 +25,9 @@ const S = {
   pick: new Set(),     // chosen entries in the signal list
   drag: null,
   colors: null,
+  hits: [],            // clickable debug marks drawn last frame: {kind, index, x0, y0, x1, y1}
+  arrowFrom: null,     // {signal, t} while placing an arrow from the context menu
+  mouse: null,         // last mouse position on the canvas, for the arrow being placed
 };
 
 // ---------------------------------------------------------------------------
@@ -587,7 +590,7 @@ function readColors() {
     bg: g('--wbg'), wave: g('--wave'), bus: g('--wbus'), fill: g('--wfill'), x: g('--wx'), xfill: g('--wxfill'),
     z: g('--wz'), text: g('--wtext'), grid: g('--grid'), edge: g('--edge'), cursor: g('--cursor'),
     marker: g('--marker'), ann: g('--ann'), ruler: g('--ruler'), rtext: g('--rtext'), rowsel: g('--rowsel'),
-    dense: g('--dense'), line: g('--line'), loading: g('--loading'),
+    dense: g('--dense'), line: g('--line'), loading: g('--loading'), arrow: g('--arrow'), comment: g('--comment'),
   };
 }
 
@@ -682,6 +685,7 @@ function drawNow() {
       ctx.fillStyle = C.bg; ctx.fillText(lbl, x + 4, RULER + 6.5);
     }
   }
+  drawMarks(st, W, H, X, C, scrollTop);
   // marker and cursor
   const vline = (t, col, dash) => {
     if (t == null) return;
@@ -715,6 +719,217 @@ function drawNow() {
   }
   renderReadout();
 }
+
+// ---------------------------------------------------------------------------
+// Debug marks from a waveview rc (.wvrc) or the context menu: named cursors,
+// arrows between signal transitions, comments on the waveform
+// ---------------------------------------------------------------------------
+
+function rowMidY(name, scrollTop) {
+  if (!name) return RULER + 7;
+  const i = S.rows.findIndex((r) => r.name === name);
+  return i < 0 ? null : RULER + i * ROW - scrollTop + ROW / 2;
+}
+
+function tag(text, x, y, col, C, align) {
+  const tw = ctx.measureText(text).width + 8;
+  const x0 = align === 'center' ? x - tw / 2 : x;
+  ctx.fillStyle = col; ctx.fillRect(x0, y - 7, tw, 14);
+  ctx.fillStyle = C.bg; ctx.textAlign = 'left'; ctx.fillText(text, x0 + 4, y + 0.5);
+  return [x0, y - 7, x0 + tw, y + 7];
+}
+
+function drawMarks(st, W, H, X, C, scrollTop) {
+  S.hits = [];
+  if (!st) return;
+  ctx.lineWidth = 1;
+  // named cursors: a solid line and a tag at the bottom
+  (st.cursors || []).forEach((c) => {
+    const x = Math.round(X(c.time)) + 0.5;
+    if (x < -200 || x > W + 200) return;
+    ctx.strokeStyle = c.color || C.ann; ctx.setLineDash([]);
+    ctx.globalAlpha = 0.85;
+    ctx.beginPath(); ctx.moveTo(x, RULER); ctx.lineTo(x, H); ctx.stroke();
+    ctx.globalAlpha = 1;
+    const b = tag(c.name + (c.label ? ' ' + c.label : ''), x, H - 28, c.color || C.ann, C, 'center');
+    S.hits.push({ kind: 'cursors', name: c.name, x0: Math.min(b[0], x - 4), y0: RULER, x1: Math.max(b[2], x + 4), y1: H });
+  });
+  // comments on the time axis: like labels, in the comment's color
+  (st.comments || []).forEach((c, i) => {
+    if (c.signal) return;
+    const x = Math.round(X(c.time)) + 0.5, col = c.color || C.comment;
+    if (x < -300 || x > W) return;
+    ctx.strokeStyle = col; ctx.setLineDash([2, 3]);
+    ctx.beginPath(); ctx.moveTo(x, RULER); ctx.lineTo(x, H); ctx.stroke(); ctx.setLineDash([]);
+    const b = tag(c.text.split('\n')[0], x, RULER + 6.5, col, C);
+    S.hits.push({ kind: 'comments', index: i, x0: b[0] - 4, y0: b[1], x1: b[2], y1: b[3] });
+  });
+  ctx.save();
+  ctx.beginPath(); ctx.rect(0, RULER, W, H - RULER); ctx.clip();
+  // arrows: a gentle curve from one transition to another
+  (st.arrows || []).forEach((a, i) => {
+    const y1 = rowMidY(a.from.signal, scrollTop), y2 = rowMidY(a.to.signal, scrollTop);
+    if (y1 == null || y2 == null) return;
+    drawArrow(X(a.from.time), y1, X(a.to.time), y2, a.color || C.arrow, a.label, C, { kind: 'arrows', index: i });
+  });
+  // comments on a signal: a dot on the transition and a callout box
+  (st.comments || []).forEach((c, i) => {
+    if (!c.signal) return;
+    const y = rowMidY(c.signal, scrollTop);
+    if (y == null) return;
+    const x = X(c.time), col = c.color || C.comment;
+    if (x < -400 || x > W + 20) return;
+    const lines = c.text.split('\n');
+    const tw = Math.max(...lines.map((l) => ctx.measureText(l).width)) + 10, th = lines.length * 14 + 6;
+    let bx = x + 16, by = y - ROW / 2 - th - 4;
+    if (bx + tw > W - 2) bx = x - 16 - tw;
+    if (by < RULER + 2) by = y + ROW / 2 + 4;
+    ctx.strokeStyle = col; ctx.fillStyle = col;
+    ctx.beginPath(); ctx.arc(x, y, 3.5, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(x, y);
+    ctx.lineTo(bx < x ? bx + tw : bx, by + (by < y ? th : 0)); ctx.stroke();
+    ctx.globalAlpha = 0.9; ctx.fillStyle = C.bg; ctx.fillRect(bx, by, tw, th); ctx.globalAlpha = 1;
+    ctx.strokeRect(bx + 0.5, by + 0.5, tw - 1, th - 1);
+    ctx.fillStyle = col; ctx.textAlign = 'left';
+    lines.forEach((l, k) => ctx.fillText(l, bx + 5, by + 10 + k * 14));
+    S.hits.push({ kind: 'comments', index: i, x0: Math.min(bx, x - 5), y0: Math.min(by, y - 5), x1: Math.max(bx + tw, x + 5), y1: Math.max(by + th, y + 5) });
+  });
+  // the arrow being placed
+  if (S.arrowFrom && S.mouse) {
+    const y1 = rowMidY(S.arrowFrom.signal, scrollTop);
+    if (y1 != null) drawArrow(X(S.arrowFrom.t), y1, S.mouse.x, S.mouse.y, C.arrow, null, C, null, true);
+  }
+  ctx.restore();
+}
+
+function drawArrow(x1, y1, x2, y2, col, label, C, hit, dashed) {
+  const dx = x2 - x1, dy = y2 - y1, len = Math.hypot(dx, dy);
+  if (len < 2) return;
+  const bend = Math.min(40, len * 0.18);
+  const cx = (x1 + x2) / 2 - dy / len * bend, cy = (y1 + y2) / 2 + dx / len * bend;
+  ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = 1.8;
+  if (dashed) ctx.setLineDash([5, 4]);
+  ctx.beginPath(); ctx.moveTo(x1, y1); ctx.quadraticCurveTo(cx, cy, x2, y2); ctx.stroke();
+  ctx.setLineDash([]); ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(x1, y1, 3, 0, Math.PI * 2); ctx.fill();
+  const ang = Math.atan2(y2 - cy, x2 - cx), hl = 9;
+  ctx.beginPath(); ctx.moveTo(x2, y2);
+  ctx.lineTo(x2 - hl * Math.cos(ang - 0.4), y2 - hl * Math.sin(ang - 0.4));
+  ctx.lineTo(x2 - hl * Math.cos(ang + 0.4), y2 - hl * Math.sin(ang + 0.4));
+  ctx.closePath(); ctx.fill();
+  const mx = 0.25 * x1 + 0.5 * cx + 0.25 * x2, my = 0.25 * y1 + 0.5 * cy + 0.25 * y2;
+  if (label) {
+    ctx.textAlign = 'center';
+    const tw = ctx.measureText(label).width + 8;
+    ctx.globalAlpha = 0.9; ctx.fillStyle = C.bg; ctx.fillRect(mx - tw / 2, my - 7, tw, 14); ctx.globalAlpha = 1;
+    ctx.fillStyle = col; ctx.fillText(label, mx, my + 0.5);
+  }
+  if (hit) {
+    for (let k = 0; k <= 10; k++) {
+      const u = k / 10, px = (1 - u) * (1 - u) * x1 + 2 * u * (1 - u) * cx + u * u * x2, py = (1 - u) * (1 - u) * y1 + 2 * u * (1 - u) * cy + u * u * y2;
+      S.hits.push({ ...hit, x0: px - 6, y0: py - 6, x1: px + 6, y1: py + 6 });
+    }
+  }
+}
+
+function hitAt(x, y) {
+  for (let k = S.hits.length - 1; k >= 0; k--) {
+    const h = S.hits[k];
+    if (x >= h.x0 && x <= h.x1 && y >= h.y0 && y <= h.y1) return h;
+  }
+  return null;
+}
+
+// a time from a mouse x, snapped to a clock edge within a few pixels
+function snapT(x) {
+  const t = xToT(x), E = edgesInView();
+  if (E && E.edges) {
+    const px = canvasW() / (S.view[1] - S.view[0]);
+    let best = null;
+    for (const e of E.edges) if (Math.abs(e - t) * px < 6 && (best == null || Math.abs(e - t) < Math.abs(best - t))) best = e;
+    if (best != null) return best;
+  }
+  return Math.round(t);
+}
+
+// rc lines go through the server's parser, the same one a .wvrc file uses
+const rcq = (text) => JSON.stringify(text);
+async function rcLines(text, merge = true) {
+  const r = await api('/api/cmd', { op: 'rc', args: { text, merge }, source: 'ui' }).catch((e) => { toast(e.message); return null; });
+  if (r && r.result.warnings.length) toast(r.result.warnings.join('\n'));
+  return r;
+}
+
+function markMenu(e) {
+  const rect = canvas.getBoundingClientRect();
+  const x = e.clientX - rect.left, y = e.clientY - rect.top;
+  const i = rowAtY(y), sig = i >= 0 ? S.rows[i].name : '';
+  const t = snapT(x), at = rcq(sig + '@' + t);
+  const h = hitAt(x, y);
+  const st = S.state || {};
+  const items = [];
+  if (h && h.kind === 'cursors') {
+    items.push({ label: `Remove cursor ${h.name}`, fn: () => cmd('unmark', { kind: 'cursors', name: h.name }) });
+  } else if (h && h.kind === 'arrows') {
+    items.push({ label: 'Edit arrow label…', fn: () => {
+      const a = st.arrows[h.index], txt = prompt('Arrow label', a.label || '');
+      if (txt == null) return;
+      cmd('unmark', { kind: 'arrows', index: h.index }).then(() => rcLines(`arrow ${rcq((a.from.signal || '') + '@' + a.from.time)} ${rcq((a.to.signal || '') + '@' + a.to.time)} ${rcq(txt)}${a.color ? ' color=' + a.color : ''}`));
+    } });
+    items.push({ label: 'Remove arrow', fn: () => cmd('unmark', { kind: 'arrows', index: h.index }) });
+  } else if (h && h.kind === 'comments') {
+    items.push({ label: 'Edit comment…', fn: () => {
+      const c = st.comments[h.index], txt = prompt('Comment (\\n for a new line)', c.text.replace(/\n/g, '\\n'));
+      if (txt == null) return;
+      cmd('unmark', { kind: 'comments', index: h.index }).then(() => rcLines(`comment ${rcq((c.signal || '') + '@' + c.time)} ${rcq(txt)}${c.color ? ' color=' + c.color : ''}`));
+    } });
+    items.push({ label: 'Remove comment', fn: () => cmd('unmark', { kind: 'comments', index: h.index }) });
+  }
+  if (items.length) items.push(null);
+  items.push({ label: 'Named cursor here…', fn: () => {
+    const used = new Set((st.cursors || []).map((c) => c.name));
+    let def = 'A'; while (used.has(def)) def = String.fromCharCode(def.charCodeAt(0) + 1);
+    const txt = prompt('Name and an optional label, e.g. "A req rises"', def);
+    if (!txt || !txt.trim()) return;
+    const [name, ...rest] = txt.trim().split(/\s+/);
+    rcLines(`cursor ${name} ${t}${rest.length ? ' ' + rcq(rest.join(' ')) : ''}`);
+  } });
+  items.push({ label: sig ? `Comment on ${sig.split('.').pop()} here…` : 'Comment on the time axis here…', fn: () => {
+    const txt = prompt('Comment (\\n for a new line)');
+    if (txt) rcLines(`comment ${at} ${rcq(txt)}`);
+  } });
+  if (sig) items.push({ label: `Arrow from ${sig.split('.').pop()} here → click the target`, fn: () => { S.arrowFrom = { signal: sig, t }; toast('Click where the arrow points (Esc cancels)'); } });
+  items.push(null);
+  items.push({ label: 'Save view as .wvrc', fn: () => { location.href = '/api/export.wvrc'; } });
+  items.push({ label: 'Load .wvrc…', fn: () => $('rcfile').click() });
+  showMenu(e.clientX, e.clientY, items);
+}
+
+function finishArrow(x, y) {
+  const i = rowAtY(y), a = S.arrowFrom;
+  S.arrowFrom = null;
+  if (i < 0) { toast('Point the arrow at a signal row'); draw(); return; }
+  const label = prompt('Arrow label (optional)', '');
+  if (label == null) { draw(); return; }
+  rcLines(`arrow ${rcq(a.signal + '@' + a.t)} ${rcq(S.rows[i].name + '@' + snapT(x))}${label ? ' ' + rcq(label) : ''}`);
+}
+
+function jumpCursor(dir) {
+  const ts = ((S.state && S.state.cursors) || []).map((c) => c.time).sort((a, b) => a - b);
+  const now = S.cursor == null ? (dir > 0 ? -Infinity : Infinity) : S.cursor;
+  const t = dir > 0 ? ts.find((x) => x > now) : ts.reverse().find((x) => x < now);
+  if (t == null) { toast(ts.length ? 'No more named cursors that way' : 'No named cursors'); return; }
+  ensureVisible(t); setCursor(t);
+}
+
+$('rcfile').addEventListener('change', async () => {
+  const f = $('rcfile').files[0];
+  if (!f) return;
+  const text = await f.text();
+  $('rcfile').value = '';
+  const r = await api('/api/cmd', { op: 'rc', args: { text, origin: f.name }, source: 'rc' }).catch((e) => { toast(e.message); return null; });
+  if (r) toast(r.result.warnings.length ? r.result.warnings.join('\n') : `Loaded ${f.name}`);
+});
 
 function drawSignal(sd, r, top, W, X, C) {
   const pts = sd.pts;
@@ -882,9 +1097,16 @@ function selectRow(i, e) {
 canvas.addEventListener('mousedown', (e) => {
   const rect = canvas.getBoundingClientRect();
   const x = e.clientX - rect.left, y = e.clientY - rect.top;
+  if (S.arrowFrom && e.button === 0) { e.preventDefault(); finishArrow(x, y); return; }
   if (e.button === 1 || (e.button === 0 && e.shiftKey)) { e.preventDefault(); setMarker(Math.round(xToT(x))); return; }
   if (e.button !== 0) return;
   S.drag = { x0: x, x1: x, y, moved: false };
+});
+canvas.addEventListener('mousemove', (e) => {
+  if (!S.arrowFrom) return;
+  const rect = canvas.getBoundingClientRect();
+  S.mouse = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  draw();
 });
 window.addEventListener('mousemove', (e) => {
   if (!S.drag) return;
@@ -908,7 +1130,7 @@ window.addEventListener('mouseup', (e) => {
   }
   draw();
 });
-canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+canvas.addEventListener('contextmenu', (e) => { e.preventDefault(); S.arrowFrom = null; markMenu(e); });
 canvas.addEventListener('wheel', (e) => {
   e.preventDefault();
   const rect = canvas.getBoundingClientRect();
@@ -1038,6 +1260,7 @@ document.addEventListener('keydown', (e) => {
   const inField = e.target.matches('input, textarea');
   if (e.key === 'Escape') {
     $('menu').hidden = true;
+    if (S.arrowFrom) { S.arrowFrom = null; draw(); return; }
     if (inField) { e.target.blur(); return; }
     S.selected.clear(); renderRows(); pushSelect(); return;
   }
@@ -1061,6 +1284,8 @@ document.addEventListener('keydown', (e) => {
     case 'N': search('prev'); break;
     case 'c': if (S.cursor != null) setView(S.cursor - (S.view[1] - S.view[0]) / 2, S.cursor + (S.view[1] - S.view[0]) / 2); break;
     case 'm': if (S.cursor != null) setMarker(S.cursor); break;
+    case ']': jumpCursor(1); break;
+    case '[': jumpCursor(-1); break;
     case 'Delete': case 'Backspace': removeSelected(); break;
     case 'h': setRadix('hex'); break;
     case 'd': setRadix('dec'); break;

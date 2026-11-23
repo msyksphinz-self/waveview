@@ -21,6 +21,11 @@ AI agent use together, built for remote development.
   there
 - **Text interface for agents**: `wavequery.py` answers info / list / get /
   table / changes / find with bounded output or JSON
+- **Debug views as files (`.wvrc`)**: the signals to look at, named cursors
+  at the moments that matter, arrows between transitions and comments on the
+  waveform, in a small text file. `serve --rc bug.wvrc` opens exactly that
+  view; `load` / `save` from the CLI, right-click to add marks in the browser
+  (see `docs/example.wvrc`)
 - Verdi interop: FSDB via Verdi's `fsdb2vcd`, nWave `.rc` in and out; GTKWave
   `.gtkw` in and out
 
@@ -40,6 +45,9 @@ python3 waveview.py src u_rob.r_rob_head                    # drivers with value
 python3 waveview.py look                                    # what the viewer shows, as text
 
 python3 wavequery.py find sim.fst 'rose(flush_valid)' --first
+
+python3 waveview.py save bug123.wvrc                         # the view, with cursors, arrows, comments
+python3 waveview.py serve --rc bug123.wvrc                   # someone else opens the same view
 ```
 
 From Windows, with the dump on a Linux build server:
@@ -53,6 +61,7 @@ waveview.cmd serve build01:/work/sim/w.fst --rtl build01:/work/proj/rtl/filelist
 | File | What |
 |---|---|
 | `waveview.py` + `waveview_ui/` | viewer server, browser UI, CLI client |
+| `waverc.py` | waveview rc (`.wvrc`): read and write debug views (format in its docstring) |
 | `wavequery.py` | text queries over a dump |
 | `wavesource.py`, `fstsrv.c` | lazy FST reading (local or over ssh) |
 | `remote.py` | ssh transport, remote build of `fstsrv`, remote RTL index |
