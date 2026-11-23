@@ -54,15 +54,20 @@ import re
 import sys
 import tempfile
 
-import matplotlib
+# matplotlib is only needed for drawing. The parser half of this file is also
+# imported by tools/wavequery.py, which must work without it.
+try:
+    import matplotlib
 
-matplotlib.use("Agg")
-matplotlib.rcParams["axes.unicode_minus"] = False
-# Keep SVG text as text so the figure stays searchable and small.
-matplotlib.rcParams["svg.fonttype"] = "none"
+    matplotlib.use("Agg")
+    matplotlib.rcParams["axes.unicode_minus"] = False
+    # Keep SVG text as text so the figure stays searchable and small.
+    matplotlib.rcParams["svg.fonttype"] = "none"
 
-import matplotlib.pyplot as plt  # noqa: E402
-from matplotlib.patches import Polygon, Rectangle  # noqa: E402
+    import matplotlib.pyplot as plt  # noqa: E402
+    from matplotlib.patches import Polygon, Rectangle  # noqa: E402
+except ImportError:  # pragma: no cover - depends on the host
+    matplotlib = plt = Polygon = Rectangle = None
 
 # Palette chosen so the picture still reads after a grayscale print: meaning is
 # carried by line style and fill pattern, the hues only help on screen.
@@ -559,6 +564,8 @@ def hex_text(value, width):
 
 def render(dump, sigs, t0, t1, args, clock_sig, trigger_time, output):
     """Draw one timing diagram and write it to output."""
+    if plt is None:
+        raise SystemExit("error: drawing needs matplotlib (pip install matplotlib)")
     scope = common_scope([s.name for s in sigs])
     labels = []
     for sig in sigs:
