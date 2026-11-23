@@ -76,3 +76,7 @@ and are skipped otherwise.
 
 Extracted from the [scariv](https://github.com/msyksphinz-self/scariv) RISC-V
 core repository, history included.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
