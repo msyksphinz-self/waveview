@@ -1,7 +1,7 @@
 /* Minimal FST <-> VCD converter built on the GTKWave FST library that ships
  * inside Verilator (<VERILATOR_ROOT>/include/gtkwave).
  *
- * It exists so that tools/wave2img.py can read .fst dumps without GTKWave
+ * It exists so that wave2img.py can read .fst dumps without GTKWave
  * being installed. wave2img.py compiles this file on demand and caches the
  * resulting binary.
  *

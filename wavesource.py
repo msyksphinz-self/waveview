@@ -1,6 +1,6 @@
 """Lazy waveform sources: dumps that are never loaded as a whole.
 
-LazyFst talks to tools/fstsrv.c, a helper process that opens an FST, sends
+LazyFst talks to fstsrv.c, a helper process that opens an FST, sends
 the hierarchy and then answers reads for chosen signals over chosen time
 windows. Nothing is converted and nothing is read until a view, a query or
 a value at the cursor needs it, so the size of the dump does not matter:
@@ -69,7 +69,7 @@ class LazyFst(wq.Wave):
         if argv is None:
             binary = w2i.build_fst_tool("fstsrv", verbose=True)
             if binary is None:
-                raise wq.QueryError("cannot build tools/fstsrv.c (needs a C compiler and Verilator's FST library)")
+                raise wq.QueryError("cannot build fstsrv.c (needs a C compiler and Verilator's FST library)")
             argv = [binary, path]
         self.path = path
         self.proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,

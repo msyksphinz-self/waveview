@@ -1,19 +1,19 @@
 """Remote dumps over ssh: the viewer runs on the desktop (Windows, macOS or
 Linux), the dump stays on the build server.
 
-    tools/waveview.py serve ssh://user@build01/work/sim/w.fst --rtl ssh://user@build01/work/scariv/core/filelist.f
-    tools/waveview.py serve build01:/work/sim/w.fst          (scp style works too)
-    tools/wavequery.py info build01:/work/sim/w.fst
+    waveview.py serve ssh://user@build01/work/sim/w.fst --rtl ssh://user@build01/work/rtl/filelist.f
+    waveview.py serve build01:/work/sim/w.fst          (scp style works too)
+    wavequery.py info build01:/work/sim/w.fst
 
 How:
-- tools/fstsrv.c speaks a line protocol on stdin/stdout, so it runs on the
+- fstsrv.c speaks a line protocol on stdin/stdout, so it runs on the
   server at the other end of an ssh session: `ssh -T -C host fstsrv w.fst`.
   Only what a view or a query asks for crosses the link, compressed
 - The first connection to a host builds fstsrv there: the C source is sent
   over ssh and compiled against the server's Verilator FST library, then
-  cached in ~/.cache/scariv/wavesrv/<source hash>/ on the server
+  cached in ~/.cache/waveview/wavesrv/<source hash>/ on the server
 - RTL for the source pane is indexed on the server by sending
-  tools/rtlindex.py to the server's python3 (nothing has to be installed),
+  rtlindex.py to the server's python3 (nothing has to be installed),
   and the files the pane shows are fetched over ssh when opened
 - The ssh client is the system one (OpenSSH ships with Windows 10 and
   later). Keys, ~/.ssh/config, jump hosts and agents work as usual. Set
@@ -73,7 +73,7 @@ class Remote:
 
     def _known_path(self):
         base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
-        return os.path.join(base, "scariv", "waveview", "remote_fstsrv.json")
+        return os.path.join(base, "waveview", "remote_fstsrv.json")
 
     def _known(self):
         try:
@@ -119,7 +119,7 @@ class Remote:
             src = fh.read()
         digest = hashlib.sha1(src).hexdigest()[:12]
         script = r'''
-d="$HOME/.cache/scariv/wavesrv/%s"
+d="$HOME/.cache/waveview/wavesrv/%s"
 if [ -x "$d/fstsrv" ]; then echo "ok $d/fstsrv"; cat > /dev/null; exit 0; fi
 mkdir -p "$d" && cat > "$d/fstsrv.c" || exit 3
 R=$(verilator --getenv VERILATOR_ROOT 2>/dev/null)
@@ -168,7 +168,7 @@ mv "$d/fstsrv.tmp" "$d/fstsrv" && echo "ok $d/fstsrv"
         return out
 
     def index_rtl(self, specs, root):
-        """Run tools/rtlindex.py on the server over its own sources and get
+        """Run rtlindex.py on the server over its own sources and get
         the design JSON back. Nothing needs to be installed there but
         python3: the script is sent over ssh."""
         with open(os.path.join(HERE, "rtlindex.py"), "rb") as fh:
@@ -201,7 +201,7 @@ def is_remote(spec):
 
 
 def main(argv=None):
-    """tools/remote.py <spec>: check that a remote dump can be served."""
+    """remote.py <spec>: check that a remote dump can be served."""
     spec = (argv or sys.argv[1:] or [""])[0]
     p = parse(spec)
     if p is None:

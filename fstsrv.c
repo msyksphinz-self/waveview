@@ -1,6 +1,6 @@
 /* fstsrv: serve an FST dump on stdin/stdout without loading it.
  *
- * tools/wavesource.py starts one of these per open dump and asks it for
+ * wavesource.py starts one of these per open dump and asks it for
  * exactly what is on screen. Opening reads only the hierarchy, so a dump of
  * any size opens at once. A read names the signals and the time window; FST
  * stores each block's changes per signal and compressed separately, so only

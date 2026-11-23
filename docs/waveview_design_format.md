@@ -1,12 +1,12 @@
 # waveview design JSON (`waveview-design/1`)
 
-The elaborated-design description that `tools/waveview.py serve --rtl <file>.json`
-and `tools/rtlindex.py <file>.json` read. It is what an exporter from another
+The elaborated-design description that `waveview.py serve --rtl <file>.json`
+and `rtlindex.py <file>.json` read. It is what an exporter from another
 design database (a Verdi KDB, a VCS `simv.daidir` through Verdi's NPI, a
 commercial linter's database) writes so that waveview's source pane, active
 annotation and driver tracing work from that database.
 
-`tools/rtlindex.py <sources or design.xml> -o design.json` writes the same
+`rtlindex.py <sources or design.xml> -o design.json` writes the same
 format from the built-in producers, which is the easiest way to see a complete
 example.
 

@@ -25,7 +25,7 @@ FSDB input:
   command line. Without a Verdi installation FSDB cannot be read
 
 FST input:
-- .fst is converted to VCD first. The converter is tools/fst2vcd_mini.c, built
+- .fst is converted to VCD first. The converter is fst2vcd_mini.c, built
   against the GTKWave FST library that ships inside Verilator
   (<VERILATOR_ROOT>/include/gtkwave). It is compiled on demand and cached, so
   GTKWave does not have to be installed
@@ -40,11 +40,11 @@ Where it differs from GTKWave:
 - No analogue traces, no enum decoding, no translate filters
 
 Usage:
-    python3 tools/wave2img.py sim.vcd -o wave.svg \
+    python3 wave2img.py sim.vcd -o wave.svg \
         -s 'tb.dut.clk' -s 'tb.dut.*_valid' --clock 'tb.dut.clk' \
         --trigger 'tb.dut.commit_valid=1' --before 2 --after 8
 
-    python3 tools/wave2img.py --selftest
+    python3 wave2img.py --selftest
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ import sys
 import tempfile
 
 # matplotlib is only needed for drawing. The parser half of this file is also
-# imported by tools/wavequery.py, which must work without it.
+# imported by wavequery.py, which must work without it.
 try:
     import matplotlib
 
@@ -302,13 +302,13 @@ def verilator_root():
 
 def cache_dir():
     base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
-    path = os.path.join(base, "scariv", "wave2img")
+    path = os.path.join(base, "waveview", "build")
     os.makedirs(path, exist_ok=True)
     return path
 
 
 def build_fst_converter(verbose=True):
-    """Compile tools/fst2vcd_mini.c on demand. Returns the binary path or None."""
+    """Compile fst2vcd_mini.c on demand. Returns the binary path or None."""
     return build_fst_tool("fst2vcd_mini", verbose)
 
 

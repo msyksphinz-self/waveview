@@ -22,9 +22,9 @@ tasks are indexed as part of the module. Anything it cannot read is skipped
 rather than fatal.
 
 Usage:
-    tools/rtlindex.py core/filelist.f --module scariv_rob
-    tools/rtlindex.py core/filelist.f --trace TOP.tb_scariv_top.u_dut.w_rob_head
-    tools/rtlindex.py --selftest
+    rtlindex.py core/filelist.f --module scariv_rob
+    rtlindex.py core/filelist.f --trace TOP.tb_scariv_top.u_dut.w_rob_head
+    rtlindex.py --selftest
 """
 
 from __future__ import annotations

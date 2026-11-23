@@ -1,6 +1,6 @@
 # waveview: AI と共有するブラウザ波形ビューワ
 
-`tools/waveview.py` は GTKWave / Verdi と同じ感覚で操作できる波形ビューワです。
+`waveview.py` は GTKWave / Verdi と同じ感覚で操作できる波形ビューワです。
 ただし画面はブラウザ、データはリモートのビルドサーバ上にあり、
 **表示状態(信号リスト・カーソル・マーカ・ズーム・メモ)をサーバ側で 1 つ持つ**ので、
 人とAIエージェントが同じ画面を同時に操作できます。
@@ -8,7 +8,7 @@
 ```
  リモートサーバ (ダンプがある場所)                 手元の PC
  ┌──────────────────────────────┐             ┌─────────────────┐
- │ tools/waveview.py serve w.fst│◀── HTTP ───▶│ ブラウザ          │
+ │ waveview.py serve w.fst│◀── HTTP ───▶│ ブラウザ          │
  │   共有ビュー状態               │  (ssh -L /  │ GTKWave 風の画面  │
  │   ▲            ▲             │   VS Code)  └─────────────────┘
  │   │ CLI        │ ファイル監視  │
@@ -22,9 +22,8 @@
 ## 起動
 
 ```sh
-make WAVE=fst build-top
-./obj_dir_top/tb_scariv_top ... +wave=w.fst +wave_from=1000 +wave_to=3000
-tools/waveview.py serve w.fst            # URL(トークン付き)が表示される
+# シミュレーションで FST を出す (Verilator なら --trace-fst、他のシミュレータは各自の方法)
+waveview.py serve w.fst            # URL(トークン付き)が表示される
 ```
 
 - リモートなら `ssh -L 8765:localhost:8765 <host>` でポート転送して URL を開く。
@@ -39,7 +38,7 @@ tools/waveview.py serve w.fst            # URL(トークン付き)が表示さ�
 
 ## 巨大なダンプ: FST はその場で、必要な分だけ読む
 
-FST は VCD に変換もしないし、メモリに読み込みもしない。`tools/fstsrv.c`
+FST は VCD に変換もしないし、メモリに読み込みもしない。`fstsrv.c`
 (Verilator 同梱の FST ライブラリで自動ビルド) がダンプを開いたまま常駐し、
 問い合わせごとに **指定した信号・指定した時間範囲だけ** を読む。
 
@@ -69,7 +68,7 @@ FST は VCD に変換もしないし、メモリに読み込みもしない。`t
 
 VCD は形式上インデックスがないので先頭から全部読むしかない。大きいものは
 一度 FST にしてから使う (GTKWave の `vcd2fst`、あるいはシミュレータで
-直接 FST を出す: Verilator なら `make WAVE=fst`)。FSDB は今は fsdb2vcd 経由
+直接 FST を出す: Verilator なら `--trace-fst`)。FSDB は今は fsdb2vcd 経由
 なので大きいものは同じ問題がある。Verdi の FsdbReader で同じプロトコルを話す
 `fsdbsrv` を作れば FST と同じ動きになる (Verdi 環境が必要)。
 
@@ -100,7 +99,7 @@ VCD は形式上インデックスがないので先頭から全部読むしか�
 ## Verdi との連携: FSDB と nWave の .rc
 
 ```sh
-tools/waveview.py serve sim.fsdb --rc signal.rc --rtl core/filelist.f
+waveview.py serve sim.fsdb --rc signal.rc --rtl core/filelist.f
 ```
 
 - **FSDB をそのまま開ける。** ただし FSDB は Synopsys の非公開フォーマットで、
@@ -114,7 +113,7 @@ tools/waveview.py serve sim.fsdb --rc signal.rc --rtl core/filelist.f
   (`-HEX` `-DEC` `-2COMP` `-BIN` `-OCT`)、`cursor` `marker` `zoom` を取り込む。
   階層は末尾一致で探すので、VCS の FSDB (`/tb/u_dut/...`) 用の .rc を
   Verilator の FST (`TOP.tb.u_dut...`) に使うこともできる
-- ツールバーの `.rc` (または `tools/waveview.py rc`) で今の表示を nWave の .rc として
+- ツールバーの `.rc` (または `waveview.py rc`) で今の表示を nWave の .rc として
   書き出せる。Verdi で `File > Restore Signal` すれば同じ信号・カーソル・ズームで開く
 - wavequery / wave2img も同じ仕組みで .fsdb を読める
 
@@ -126,7 +125,7 @@ tools/waveview.py serve sim.fsdb --rc signal.rc --rtl core/filelist.f
 ```bat
 rem 初回だけ: Python 3 (python.org か winget install Python.Python.3.12) と、
 rem サーバへ鍵で入れる ssh (Windows 10 以降は OpenSSH クライアントが標準で入っている)
-tools\waveview.cmd serve build01:/work/sim/w.fst --rtl build01:/work/scariv/core/filelist.f --rtl-root /work/scariv --open
+tools\waveview.cmd serve build01:/work/sim/w.fst --rtl build01:/work/proj/rtl/filelist.f --rtl-root /work/proj --open
 ```
 
 - `ssh://user@host:port/abs/path` か `user@host:/abs/path` で指定する
@@ -136,7 +135,7 @@ tools\waveview.cmd serve build01:/work/sim/w.fst --rtl build01:/work/scariv/core
   サーバ側に置いたまま動く。画面が必要とする信号・時間範囲・要約だけが
   ssh を通り、ssh の圧縮もかかる
 - サーバ側の準備は不要。初回接続時に `fstsrv.c` を ssh で送り、サーバの
-  Verilator の FST ライブラリでビルドして `~/.cache/scariv/wavesrv/` に置く。
+  Verilator の FST ライブラリでビルドして `~/.cache/waveview/wavesrv/` に置く。
   場所は手元で覚えるので、2 回目からは接続 1 本で始まる (消されていたら作り直す)
 - ソース表示: `--rtl host:/path` はサーバ上で `rtlindex.py` を (ssh で送って)
   python3 で実行して索引を作り、ソースペインで開いたファイルだけを取りに行く。
@@ -174,12 +173,12 @@ tools\waveview.cmd serve build01:/work/sim/w.fst --rtl build01:/work/scariv/core
 ## ソース表示: Active Annotation とドライバの追跡 (Verdi nTrace 風)
 
 ```sh
-tools/waveview.py serve w.fst --rtl core/filelist.f --rtl core/tb/top
+waveview.py serve w.fst --rtl core/filelist.f --rtl core/tb/top
 ```
 
 `--rtl` に filelist (.f)・ファイル・ディレクトリを渡すと RTL を索引する
 (省略時はカレントディレクトリ、vendor/ と obj_dir は除く)。索引は
-`tools/rtlindex.py` による軽量な解析で、エラボレータは使わない。
+`rtlindex.py` による軽量な解析で、エラボレータは使わない。
 ダンプの階層名 (`TOP.tb_scariv_top.u_dut.u_rob.r_rob_head`) をモジュール・
 インスタンス・generate ブロックをたどってソースに対応づける。ソースを編集すると
 自動で索引し直す。
@@ -220,8 +219,9 @@ tools/waveview.py serve w.fst --rtl core/filelist.f --rtl core/tb/top
 | `design.json` (waveview design 形式) | 任意のツールが書き出したエラボレーション結果 | 書き出し元しだい |
 
 ```sh
-make design-top                                   # obj_dir_top_design/design.xml を作る (数秒)
-tools/waveview.py serve w.fst --rtl obj_dir_top_design/design.xml
+# ビルドと同じフラグ・ファイルで --xml-only を付けて Verilator を流す (数秒)
+verilator --xml-only --xml-output design.xml --top-module <tb> <ビルドと同じ -f / +define / ソース>
+waveview.py serve w.fst --rtl design.xml
 ```
 
 ### KDB / simv.daidir について
@@ -234,30 +234,30 @@ Verdi の KDB や VCS の `simv.daidir` もエラボレーション済みの設�
 ライセンスがある環境でしか作れず、まだ用意していない。形式は
 [waveview_design_format.md](waveview_design_format.md) に定義した。
 VCS でしかエラボレーションできない設計 (UVM・暗号化 IP 入りなど) では、これが
-正確なソース追跡への道になる。Verilator が通る設計なら `make design-<tb>` で足りる。
+正確なソース追跡への道になる。Verilator が通る設計なら `verilator --xml-only` で足りる。
 
 AI からは同じことをテキストで行える:
 
 ```sh
-tools/waveview.py src u_rob.r_rob_head            # 宣言とドライバ、各行の信号のカーソル時刻の値
-tools/waveview.py src u_rob.r_rob_head --loads    # 読んでいる側
-tools/waveview.py src u_rob.r_rob_head --open     # ユーザーのソースペインにも表示する
-tools/rtlindex.py core/filelist.f core/tb/top --trace TOP.tb_scariv_top.u_dut.w_rob_head
+waveview.py src u_rob.r_rob_head            # 宣言とドライバ、各行の信号のカーソル時刻の値
+waveview.py src u_rob.r_rob_head --loads    # 読んでいる側
+waveview.py src u_rob.r_rob_head --open     # ユーザーのソースペインにも表示する
+rtlindex.py core/filelist.f core/tb/top --trace TOP.tb_scariv_top.u_dut.w_rob_head
 ```
 
 ## AI エージェントとの連携
 
 エージェント (や任意のシェル) から CLI で同じ画面を操作できる。実行中のサーバは
-`~/.cache/scariv/waveview/` から自動で見つけるので、ポートやトークンの指定は要らない。
+`~/.cache/waveview/server/` から自動で見つけるので、ポートやトークンの指定は要らない。
 
 ```sh
-tools/waveview.py look            # 今ユーザーが見ている画面をテキストで (値・カーソル・マーカ)
-tools/waveview.py add '*u_rob.commit_*'
-tools/waveview.py goto --cycle 1234 --span 40
-tools/waveview.py annotate --cycle 1230 "mispredict"
-tools/waveview.py note "flush は 1230 の BRU mispredict が原因"
-tools/waveview.py find 'rose(flush_valid)'
-tools/waveview.py inbox --wait 600   # ユーザーの「Send to AI」を待つ
+waveview.py look            # 今ユーザーが見ている画面をテキストで (値・カーソル・マーカ)
+waveview.py add '*u_rob.commit_*'
+waveview.py goto --cycle 1234 --span 40
+waveview.py annotate --cycle 1230 "mispredict"
+waveview.py note "flush は 1230 の BRU mispredict が原因"
+waveview.py find 'rose(flush_valid)'
+waveview.py inbox --wait 600   # ユーザーの「Send to AI」を待つ
 ```
 
 - エージェントの操作は即座にブラウザに反映され、ステータスバーに `agent: goto` のように出る
@@ -265,7 +265,7 @@ tools/waveview.py inbox --wait 600   # ユーザーの「Send to AI」を待つ
 - 「Send to AI」ボタン (または右クリック → Ask AI) で、メッセージと**その時の画面状態**
   がエージェントに届く。エージェントが `inbox --wait` で待っている間はステータスバーに
   「AI listening」と表示される
-- 深掘りのテキスト問い合わせは `tools/wavequery.py` (table / find / changes) を使う。
+- 深掘りのテキスト問い合わせは `wavequery.py` (table / find / changes) を使う。
   Claude Code 向けの手順は `.claude/skills/wave-debug/SKILL.md`
 
 HTTP API (`/api/cmd`, `/api/snapshot`, `/api/wave`, `/api/events` など) も
@@ -274,7 +274,7 @@ HTTP API (`/api/cmd`, `/api/snapshot`, `/api/wave`, `/api/events` など) も
 ## テスト
 
 ```sh
-tools/waveview.py selftest
-tools/wavequery.py --selftest
-tools/rtlindex.py --selftest
+waveview.py selftest
+wavequery.py --selftest
+rtlindex.py --selftest
 ```

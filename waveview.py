@@ -2,12 +2,12 @@
 """waveview: a GTKWave / Verdi style waveform viewer in the browser, shared
 between a person and an AI agent, built for remote development.
 
-    tools/waveview.py serve w.fst              start a viewer on the dump
-    tools/waveview.py add '*u_rob.commit_*'    (from any shell) add signals
-    tools/waveview.py goto --cycle 1234        move the cursor and the view
-    tools/waveview.py note "flush comes from the BRU mispredict here"
-    tools/waveview.py look                     what the viewer shows, as text
-    tools/waveview.py inbox --wait             wait for "Send to AI" from the UI
+    waveview.py serve w.fst              start a viewer on the dump
+    waveview.py add '*u_rob.commit_*'    (from any shell) add signals
+    waveview.py goto --cycle 1234        move the cursor and the view
+    waveview.py note "flush comes from the BRU mispredict here"
+    waveview.py look                     what the viewer shows, as text
+    waveview.py inbox --wait             wait for "Send to AI" from the UI
 
 Why it is built this way:
 - The server runs where the dump is (the remote build machine) and needs
@@ -19,7 +19,7 @@ Why it is built this way:
   change is pushed to every open browser at once. So an agent can say "look
   here" by moving the view, and read back what the person is looking at
 - The command line half finds the running server by itself (a registry under
-  ~/.cache/scariv/waveview), so an agent does not need to know ports or tokens
+  ~/.cache/waveview/server), so an agent does not need to know ports or tokens
 - When the simulation rewrites the dump, the viewer reloads it in place and
   keeps the signal list, cursor and zoom
 - The view is saved next to the dump (<dump>.waveview.json) and restored on
@@ -27,14 +27,14 @@ Why it is built this way:
   writes one, so the same signal list opens in GTKWave too
 
 From a desktop (Windows included) the dump can stay on the build server:
-`serve build01:/work/sim/w.fst` reads it through tools/fstsrv.c running there
-over ssh (tools/remote.py); only what the view asks for crosses the link.
+`serve build01:/work/sim/w.fst` reads it through fstsrv.c running there
+over ssh (remote.py); only what the view asks for crosses the link.
 
 Security: the server binds to 127.0.0.1 and every request needs a random
 token (in the printed URL, then a cookie). On a shared server other users
 cannot read the dump through it.
 
-FST is read in place, on demand, through tools/wavesource.py: nothing is
+FST is read in place, on demand, through wavesource.py: nothing is
 converted or loaded up front, so a dump of any size opens at once. VCD is
 parsed into memory. The condition language is the one wavequery uses.
 """
@@ -80,7 +80,7 @@ TILE_CACHE = 40000
 
 def registry_dir():
     base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
-    path = os.path.join(base, "scariv", "waveview")
+    path = os.path.join(base, "waveview", "server")
     os.makedirs(path, mode=0o700, exist_ok=True)
     return path
 
@@ -260,7 +260,7 @@ class Hub:
         lines = [
             "Magic 271485",
             "Revision waveview",
-            "; written by scariv tools/waveview.py",
+            "; written by waveview",
             "; File list:",
             'openDirFile -d / "" "%s"' % self.dump_path,
             "windowTimeUnit %s" % ("1" + unit if unit[0].isalpha() else unit),
@@ -967,7 +967,7 @@ class Hub:
 
     def export_gtkw(self):
         lines = [
-            "[*] written by scariv tools/waveview.py",
+            "[*] written by waveview",
             '[dumpfile] "%s"' % self.dump_path,
             "[timestart] %d" % int(self.state["view"][0]),
         ]
@@ -1230,7 +1230,7 @@ def cmd_serve(args):
         print("  data      read over ssh from %s, only what the view asks for" % remote.parse(hub.dump_path)[0].host)
     else:
         print("  remote    ssh -L %d:localhost:%d %s   (VS Code Remote forwards it by itself)" % (port, port, hostname))
-    print("  control   tools/waveview.py add '<pattern>' | goto --cycle N | look | note TEXT")
+    print("  control   waveview.py add '<pattern>' | goto --cycle N | look | note TEXT")
     sys.stdout.flush()
     if args.open:
         import webbrowser
@@ -1301,7 +1301,7 @@ class Client:
                 ss = [s for s in ss if s["dump"] == want]
             if not ss:
                 raise wq.QueryError(
-                    "no running waveview found%s. Start one with: tools/waveview.py serve <dump>"
+                    "no running waveview found%s. Start one with: waveview.py serve <dump>"
                     % (" for %s" % dump if dump else "")
                 )
             url, token = ss[0]["url"], ss[0]["token"]

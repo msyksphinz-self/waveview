@@ -1,4 +1,4 @@
-// waveview browser UI. Talks to tools/waveview.py; the view state lives on the
+// waveview browser UI. Talks to waveview.py; the view state lives on the
 // server so that the command line (and an AI agent) can drive it too.
 'use strict';
 
@@ -399,7 +399,7 @@ function renderRows() {
   if (!S.rows.length) {
     const e = document.createElement('div');
     e.className = 'empty';
-    e.innerHTML = 'No signals yet.<br>Pick a scope on the left and double-click signals, or drag them here.<br>From a shell: <code>tools/waveview.py add \'*valid*\'</code>';
+    e.innerHTML = 'No signals yet.<br>Pick a scope on the left and double-click signals, or drag them here.<br>From a shell: <code>waveview.py add \'*valid*\'</code>';
     names.appendChild(e);
   }
   S.rows.forEach((r, i) => {

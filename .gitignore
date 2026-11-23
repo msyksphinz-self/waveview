@@ -1,0 +1,6 @@
+# view state saved next to dumps
+*.waveview.json
+__pycache__/
+*.fst
+*.vcd
+*.fsdb

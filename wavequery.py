@@ -42,18 +42,18 @@ Expressions (find, table --around, table --where):
   bit(s, n) bits(s, hi, lo) isx(s)
 
 Examples:
-    tools/wavequery.py info sim.fst
-    tools/wavequery.py list sim.fst '*rob*valid*'
-    tools/wavequery.py find sim.fst 'commit_valid && commit_pc == 0x80000040'
-    tools/wavequery.py table sim.fst -s '*commit_*' --around 'rose(trap)' -B 3 -A 5
-    tools/wavequery.py changes sim.fst -s '*.flush*' --cycles 100:400
-    tools/wavequery.py get sim.fst --cycle 1234 -s '*.pc' --format json
-    tools/wavequery.py --selftest
+    wavequery.py info sim.fst
+    wavequery.py list sim.fst '*rob*valid*'
+    wavequery.py find sim.fst 'commit_valid && commit_pc == 0x80000040'
+    wavequery.py table sim.fst -s '*commit_*' --around 'rose(trap)' -B 3 -A 5
+    wavequery.py changes sim.fst -s '*.flush*' --cycles 100:400
+    wavequery.py get sim.fst --cycle 1234 -s '*.pc' --format json
+    wavequery.py --selftest
 
-FST is read in place and on demand (tools/wavesource.py and tools/fstsrv.c):
+FST is read in place and on demand (wavesource.py and fstsrv.c):
 opening reads only the hierarchy, and each query decompresses only the
 signals and time range it needs, so dump size does not matter. VCD (and
-FSDB through fsdb2vcd) is read into memory with tools/wave2img.py's parser.
+FSDB through fsdb2vcd) is read into memory with wave2img.py's parser.
 A search over a long range evaluates only where its signals change.
 """
 
@@ -91,7 +91,7 @@ def _cache_path(path):
     key = "%s|%d|%d|%d" % (os.path.abspath(path), st.st_size, int(st.st_mtime_ns), CACHE_VERSION)
     digest = hashlib.sha1(key.encode()).hexdigest()[:20]
     base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
-    return os.path.join(base, "scariv", "wavequery", digest + ".pickle")
+    return os.path.join(base, "waveview", "parse", digest + ".pickle")
 
 
 class Wave:
@@ -225,7 +225,7 @@ class Wave:
     def by_code(self, code):
         return self.times.get(code, []), self.values.get(code, [])
 
-    # -- the interface shared with the lazy sources (tools/wavesource.py) --
+    # -- the interface shared with the lazy sources (wavesource.py) --
 
     lazy = False
 
@@ -299,7 +299,7 @@ class Wave:
 
 
 def load(path):
-    # FST is read in place, on demand (tools/wavesource.py), also from another
+    # FST is read in place, on demand (wavesource.py), also from another
     # machine over ssh (host:/path/w.fst); WAVE_EAGER=1 falls back to
     # converting and loading a local FST whole
     import remote
@@ -1104,14 +1104,14 @@ def run_selftest():
           lambda t: [e["cycle"] for e in json.loads(t)["events"]] == [0, 2, 3, 7, 9])
     check("max-rows truncates", ["table", path, "-s", "data", "--max-rows", "3"],
           lambda t: "more rows not shown" in t)
-    check("cache is reused", ["info", path], lambda t: os.listdir(os.path.join(tmp, "cache", "scariv", "wavequery")))
+    check("cache is reused", ["info", path], lambda t: os.listdir(os.path.join(tmp, "cache", "waveview", "parse")))
 
     rc, text = run(["get", path, "--cycle", "1", "-s", "nosuch"])
     ok = rc == 2 and "no signal named" in text
     print("%-4s %s" % ("ok" if ok else "FAIL", "unknown name is a clear error"))
     failures += 0 if ok else 1
 
-    # the same queries on an FST, which is read lazily (tools/wavesource.py)
+    # the same queries on an FST, which is read lazily (wavesource.py)
     conv = w2i.build_fst_converter(verbose=False)
     if conv is None:
         print("skip FST checks: the FST tools cannot be built here (needs Verilator's FST library)")
