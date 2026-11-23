@@ -107,3 +107,7 @@ tools/waveview.py src u_rob.r_rob_head --open     # show it in the user's source
   the port inside it (`u_rob.o_rob_head`). `parent_conn` means an input port:
   the connected signal in the parent is next
 - Without a running viewer: `tools/rtlindex.py <filelist.f> <tb dir> --trace <full name>`
+- For exact tracing (generate blocks, parameterized copies, port expressions)
+  use the elaborated design: `make design-top`, then pass
+  `obj_dir_top_design/design.xml` to `--rtl` or to rtlindex.py instead of the
+  filelist

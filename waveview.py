@@ -651,10 +651,22 @@ class Hub:
         specs = self.rtl_specs or ["."]
         self.src_status = "indexing"
         t0 = time.time()
-        files = rtlindex.collect_sources(specs)
-        if specs == ["."]:
-            files = [f for f in files if "/vendor/" not in f and "/third_party/" not in f and "/obj_dir" not in f]
-        idx = rtlindex.Index(files)
+        try:
+            if len(specs) == 1 and specs[0].endswith((".json", ".xml")):
+                # an elaborated design: Verilator --xml-only, or design JSON
+                # from any exporter (e.g. one reading a Verdi KDB / daidir)
+                idx = rtlindex.load_any(specs)
+                files = [specs[0]] + [idx.abs(f) for f in idx.files]
+            else:
+                files = rtlindex.collect_sources(specs)
+                if specs == ["."]:
+                    files = [f for f in files if "/vendor/" not in f and "/third_party/" not in f
+                             and "/obj_dir" not in f]
+                idx = rtlindex.Index(files)
+        except Exception as exc:  # noqa: BLE001
+            self.src_status = "index failed: %s" % exc
+            sys.stderr.write("waveview: %s\n" % self.src_status)
+            return
         mt = {}
         for f in files:
             try:
@@ -664,7 +676,8 @@ class Hub:
         with self.lock:
             self.src = idx
             self.src_mtimes = mt
-            self.src_status = "%d modules from %d files (%.1fs)" % (len(idx.modules), len(files), time.time() - t0)
+            self.src_status = "%s: %d modules from %d files (%.1fs)" % (
+                idx.producer, len(idx.modules), len(files), time.time() - t0)
         sys.stderr.write("waveview: source index: %s\n" % self.src_status)
 
     def index(self):
@@ -684,7 +697,7 @@ class Hub:
                     continue
         return self.src
 
-    def dump_names(self, scope):
+    def dump_names(self, scope, mod=None):
         """Dump signals directly in `scope`, grouped by source identifier:
         'w_x' -> ['scope.w_x'], arrays 'w_a' -> ['scope.w_a[0]', ...],
         structs 'w_s' -> ['scope.w_s.f1', ...]."""
@@ -695,6 +708,13 @@ class Hub:
             if not n.startswith(pre):
                 continue
             rest = n[len(pre):]
+            comps = rest.split(".")
+            # signals declared inside generate blocks: gen_x[0].w_y -> w_y
+            if mod is not None and len(comps) > 1 and rtlindex.Index._strip(comps[0]) in mod.gen_labels:
+                base = re.split(r"[.\[(]", comps[1], maxsplit=1)[0]
+                if base not in mod.instances:
+                    out.setdefault(base, []).append(n)
+                continue
             base = re.split(r"[.\[(]", rest, maxsplit=1)[0]
             out.setdefault(base, []).append(n)
         return out
@@ -727,7 +747,14 @@ class Hub:
             raise wq.QueryError("scope %s is not in the source index" % scope)
         v = idx.module_view(mod)
         v["scope"] = scope
-        names = self.dump_names(scope)
+        names = self.dump_names(scope, mod)
+        # a generate scope (gen_x[0]) also sees the signals of its module
+        comps = scope.split(".")
+        while len(comps) > 1 and rtlindex.Index._strip(comps[-1]) in mod.gen_labels:
+            comps.pop()
+        if len(comps) < len(scope.split(".")):
+            for k, ns in self.dump_names(".".join(comps), mod).items():
+                names.setdefault(k, ns)
         v["signals"] = {k: names[k][:64] for k in {i[2] for i in v["idents"] if i[3] in ("signal", "param")} if k in names}
         v["children"] = self.child_scopes(scope, mod)
         up = idx.parent_scope(scope)

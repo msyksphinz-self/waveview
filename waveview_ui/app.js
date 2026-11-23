@@ -1299,13 +1299,15 @@ function srcAnnot() {
     const params = new Set(v.idents.filter((i) => i[3] === 'param').map((i) => i[2]));
     for (const name of Object.keys(v.signals)) {
       const ns = v.signals[name].slice(0, 8);
-      const base = SRC.scope + '.' + name;
       const parts = [];
       let chg = false, xx = false;
       for (const n of ns) {
         const bits = now.values[n];
         if (bits == null) continue;
-        const label = n === base ? '' : n.slice(base.length).replace(/^\./, '') + '=';
+        // element / field part after the identifier: [0], .valid, gen_x[1]...
+        const at = n.lastIndexOf('.' + name);
+        const tail = at >= 0 ? n.slice(at + 1 + name.length).replace(/^\./, '') : '';
+        const label = tail ? tail + '=' : '';
         // parameters read better in decimal
         parts.push(label + fmtVal(bits, bits.length, params.has(name) ? 'dec' : 'hex'));
         if (before.values[n] !== bits) chg = true;

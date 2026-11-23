@@ -143,6 +143,33 @@ tools/waveview.py serve w.fst --rtl core/filelist.f --rtl core/tb/top
 - 解析は構文の近似なので、マクロで組み立てた信号名や interface の modport 経由の
   接続は追えないことがある
 
+### ソース解析のバックエンド: ヒューリスティック / エラボレーション済み
+
+`--rtl` に渡すものでバックエンドが変わる。
+
+| `--rtl` に渡すもの | 中身 | 精度 |
+|---|---|---|
+| filelist / ファイル / ディレクトリ | `rtlindex.py` による構文の近似解析 | 普通の RTL なら十分。マクロ・interface は弱い |
+| `design.xml` (Verilator `--xml-only`) | Verilator がエラボレーションした結果 | 正確。generate 展開・パラメータ違いのモジュール・ポート接続の列位置まで |
+| `design.json` (waveview design 形式) | 任意のツールが書き出したエラボレーション結果 | 書き出し元しだい |
+
+```sh
+make design-top                                   # obj_dir_top_design/design.xml を作る (数秒)
+tools/waveview.py serve w.fst --rtl obj_dir_top_design/design.xml
+```
+
+### KDB / simv.daidir について
+
+Verdi の KDB や VCS の `simv.daidir` もエラボレーション済みの設計データベースで、
+使えれば上の表の 2 行目と同じ精度になる。ただしどちらも Synopsys の非公開バイナリ
+形式で、読めるのは Verdi の NPI (Novas Programming Interface, C / Tcl / Python) だけ。
+そのため waveview は KDB / daidir を直接は読まず、**NPI で書き出した design JSON を
+読む** 形にしてある。書き出し側 (KDB / daidir → design JSON) は Verdi のライブラリと
+ライセンスがある環境でしか作れず、まだ用意していない。形式は
+[waveview_design_format.md](waveview_design_format.md) に定義した。
+VCS でしかエラボレーションできない設計 (UVM・暗号化 IP 入りなど) では、これが
+正確なソース追跡への道になる。Verilator が通る設計なら `make design-<tb>` で足りる。
+
 AI からは同じことをテキストで行える:
 
 ```sh

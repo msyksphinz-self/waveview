@@ -30,6 +30,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -149,6 +150,7 @@ class Instance:
 class Module:
     def __init__(self, name, file, line):
         self.name, self.file, self.line = name, file, line
+        self.orig = name  # source name (an elaborated copy may be bit_cnt__W2)
         self.end_line = line
         self.ports = []  # [name] in order
         self.port_dir = {}  # name -> input/output/inout
@@ -590,11 +592,22 @@ def collect_sources(specs):
 
 
 class Index:
-    def __init__(self, files, root=None):
+    """Modules and, when an elaborated source provided it, the exact
+    instance tree (hier: instance path -> module name).
+
+    Producers: Index(files) parses sources with the heuristics above;
+    from_verilator_xml() reads Verilator's elaborated --xml-only output;
+    load_json() reads the open design JSON that any other tool (for example
+    an exporter on top of Verdi's NPI reading a KDB or simv.daidir) can
+    write. save_json() writes that format."""
+
+    def __init__(self, files=(), root=None, producer="rtlindex"):
         self.root = os.path.abspath(root or os.getcwd())
         self.modules = {}
-        self.files = files
+        self.files = list(files)
         self.errors = []
+        self.hier = {}
+        self.producer = producer
         for f in files:
             try:
                 with open(f, errors="replace") as fh:
@@ -624,6 +637,10 @@ class Index:
         (module, rest) where rest are trailing components that are not
         hierarchy (struct fields of a signal), or (None, None)."""
         comps = scope.split(".") if scope else []
+        if self.hier:
+            hit = self._resolve_hier(comps)
+            if hit is not None:
+                return hit
         k = 0
         while k < len(comps) and self._strip(comps[k]) not in self.modules:
             k += 1
@@ -642,6 +659,33 @@ class Index:
                 return mod, comps[k:]
             k += 1
         return mod, []
+
+    def _resolve_hier(self, comps):
+        """Exact lookup in an elaborated instance tree. The dump may carry a
+        wrapper scope the design does not (Verilator's TOP)."""
+        roots = self._roots
+        start = next((k for k, c in enumerate(comps) if c in roots), None)
+        if start is None:
+            return None
+        for cut in range(len(comps), start, -1):
+            key = ".".join(comps[start:cut])
+            name = self.hier.get(key)
+            if name is None or name not in self.modules:
+                continue
+            mod = self.modules[name]
+            rest = comps[cut:]
+            while rest and self._strip(rest[0]) in mod.gen_labels:
+                rest = rest[1:]
+            return mod, rest
+        return None
+
+    @property
+    def _roots(self):
+        r = getattr(self, "_roots_cache", None)
+        if r is None or r[0] != len(self.hier):
+            r = (len(self.hier), {k.split(".")[0] for k in self.hier})
+            self._roots_cache = r
+        return r[1]
 
     def parent_scope(self, scope):
         """Scope of the module instance that contains `scope`'s instance,
@@ -675,7 +719,7 @@ class Index:
 
     def describe(self, mod, name):
         return {
-            "module": mod.name,
+            "module": mod.orig,
             "file": mod.file,
             "decl": mod.decls[name].as_dict() if name in mod.decls else None,
             "port_dir": mod.port_dir.get(name),
@@ -769,7 +813,7 @@ class Index:
                 continue
             idents.append([line, col, name, kind])
         return {
-            "module": mod.name,
+            "module": mod.orig,
             "file": mod.file,
             "start": mod.line,
             "end": mod.end_line,
@@ -777,6 +821,265 @@ class Index:
             "idents": idents,
             "instances": {n: {"module": i.mtype, "line": i.line, "gen": i.gen} for n, i in mod.instances.items()},
         }
+
+
+    # -- the open design JSON ---------------------------------------------------
+
+    def save_json(self, path):
+        def locs(table):
+            return {n: [[l.file, l.line, l.col, l.kind] for l in v] for n, v in table.items()}
+
+        mods = {}
+        for m in self.modules.values():
+            mods[m.name] = {
+                "orig": m.orig, "file": m.file, "line": m.line, "end": m.end_line,
+                "ports": [[p, m.port_dir.get(p, "inout")] for p in m.ports],
+                "params": sorted(m.params),
+                "decls": {n: [l.file, l.line, l.col, l.kind] for n, l in m.decls.items()},
+                "drivers": locs(m.drivers), "loads": locs(m.loads),
+                "gen": m.gen_labels,
+                "instances": {
+                    n: {"module": i.mtype, "file": i.file, "line": i.line, "col": i.col, "gen": i.gen,
+                        "wildcard": i.wildcard,
+                        "conns": [[p, [[t.kind, t.text, t.line, t.col] for t in toks], ln, col]
+                                  for p, toks, ln, col in i.conns]}
+                    for n, i in m.instances.items()},
+            }
+        doc = {"format": "waveview-design/1", "producer": self.producer, "root": self.root,
+               "files": self.files, "modules": mods, "hier": self.hier}
+        with open(path, "w") as fh:
+            json.dump(doc, fh, separators=(",", ":"))
+
+    @classmethod
+    def load_json(cls, path, root=None):
+        with open(path) as fh:
+            doc = json.load(fh)
+        if doc.get("format") != "waveview-design/1":
+            raise ValueError("%s is not a waveview design file" % path)
+        idx = cls((), root=root or doc.get("root"), producer=doc.get("producer", "json"))
+        idx.files = list(doc.get("files", []))
+        for name, d in doc["modules"].items():
+            m = Module(name, d["file"], d["line"])
+            m.orig, m.end_line = d.get("orig", name), d.get("end", d["line"])
+            for p, dr in d.get("ports", []):
+                m.ports.append(p)
+                m.port_dir[p] = dr
+            m.params = set(d.get("params", []))
+            m.decls = {n: Loc(v[0], v[1], v[2], v[3], {"dir": m.port_dir[n]} if n in m.port_dir else None)
+                       for n, v in d.get("decls", {}).items()}
+            m.drivers = {n: [Loc(*x) for x in v] for n, v in d.get("drivers", {}).items()}
+            m.loads = {n: [Loc(*x) for x in v] for n, v in d.get("loads", {}).items()}
+            m.gen_labels = dict(d.get("gen", {}))
+            for n, i in d.get("instances", {}).items():
+                inst = Instance(n, i["module"], i.get("file", m.file), i["line"], i.get("col", 0))
+                inst.gen, inst.wildcard = i.get("gen"), i.get("wildcard", False)
+                inst.conns = [(p, [Tok(*t) for t in toks], ln, col) for p, toks, ln, col in i.get("conns", [])]
+                m.instances[n] = inst
+            idx.modules[name] = m
+        idx.hier = dict(doc.get("hier", {}))
+        return idx
+
+    # -- Verilator's elaborated XML ------------------------------------------
+
+    @classmethod
+    def from_verilator_xml(cls, path, root=None):
+        """Exact index from `verilator --xml-only`: every module as
+        elaborated (one per parameter set), generate blocks unrolled, the
+        instance tree, and each assignment's target at its exact column."""
+        import xml.etree.ElementTree as ET
+
+        idx = cls((), root=root, producer="verilator-xml")
+        tree = ET.parse(path)
+        files = {}
+        for f in tree.iter("file"):
+            fn = f.get("filename", "")
+            files[f.get("id")] = idx.rel(fn) if fn and not fn.startswith("<") else None
+        idx.files = sorted({v for v in files.values() if v})
+
+        def loc(e):
+            parts = (e.get("loc") or "").split(",")
+            if len(parts) < 3 or files.get(parts[0]) is None:
+                return None, 0, 0
+            return files[parts[0]], int(parts[1]), max(0, int(parts[2]) - 1)
+
+        for xm in tree.iter("module"):
+            f, line, _ = loc(xm)
+            if f is None:
+                continue
+            m = Module(xm.get("name"), f, line)
+            m.orig = _vdecode(xm.get("origName") or xm.get("name"))
+            end = line
+            for e in xm.iter():
+                ef, el, _ = loc(e)
+                if ef == f and el > end:
+                    end = el
+            m.end_line = end
+            _XmlModule(m, loc).walk(xm, None, [])
+            idx.modules[m.name] = m
+
+        def cells(e):
+            for c in e.findall("cell"):
+                idx.hier[_vdecode(c.get("hier"))] = c.get("submodname")
+                cells(c)
+
+        for cs in tree.iter("cells"):
+            cells(cs)
+        for m in idx.modules.values():
+            for table in (m.drivers, m.loads):
+                for v in table.values():
+                    v.sort(key=lambda l: (l.file, l.line, l.col))
+        return idx
+
+
+def _vdecode(name):
+    """Verilator's escaped names: loop__BRA__0__KET__ -> loop[0], __05F -> _"""
+    if not name:
+        return name
+    name = name.replace("__BRA__", "[").replace("__KET__", "]").replace("__DOT__", ".")
+    return re.sub(r"__0([0-9A-F]{2})", lambda m: chr(int(m.group(1), 16)), name)
+
+
+class _XmlModule:
+    """Fills a Module from one <module> element of Verilator's XML."""
+
+    ASSIGNS = {"contassign": "assign", "assignw": "assign", "assignalias": "assign", "assigndly": "always_ff"}
+    INDEXED = {"sel", "arraysel", "structsel", "membersel", "wordsel"}
+
+    def __init__(self, m, loc):
+        self.m, self.loc = m, loc
+        self.seen = set()
+
+    def _add(self, table, name, e, kind):
+        f, line, col = self.loc(e)
+        if f is None:
+            return
+        key = (id(table), name, line, col, kind)
+        if key in self.seen:  # unrolled generate copies share their source
+            return
+        self.seen.add(key)
+        self.m.add(table, name, Loc(f, line, col, kind))
+
+    def walk(self, e, proc, gen):
+        tag = e.tag
+        if tag == "var":
+            name = _vdecode(e.get("origName") or e.get("name")).split(".")[-1]
+            f, line, col = self.loc(e)
+            if f is None:
+                return
+            d = e.get("dir")
+            if e.get("param") == "true" or e.get("localparam") == "true":
+                self.m.params.add(name)
+                self.m.decls.setdefault(name, Loc(f, line, col, "param"))
+            elif d:
+                d = {"in": "input", "out": "output"}.get(d, d)
+                if name not in self.m.port_dir:
+                    self.m.ports.append(name)
+                self.m.port_dir[name] = d
+                self.m.decls[name] = Loc(f, line, col, "port", {"dir": d})
+            else:
+                self.m.decls.setdefault(name, Loc(f, line, col, "decl"))
+            for c in e:
+                self.loads(c)
+            return
+        if tag == "begin" and e.get("name"):
+            label = _vdecode(e.get("name"))
+            base = Index._strip(label)
+            if not base.startswith("unnamedblk"):
+                f, line, _ = self.loc(e)
+                self.m.gen_labels.setdefault(base, line)
+                gen = gen + [base]
+        if tag in ("always", "always_ff", "always_comb", "always_latch"):
+            proc = "comb"
+        elif tag in ("initial", "initialstatic", "final"):
+            proc = "init"
+        if tag in self.ASSIGNS or tag == "assign":
+            kids = list(e)
+            if len(kids) >= 2:
+                kind = self.ASSIGNS.get(tag) or (proc or "comb")
+                self.loads(kids[0])
+                self.target(kids[1], kind)
+                for c in kids[2:]:
+                    self.loads(c)
+            return
+        if tag == "instance":
+            self.instance(e, gen)
+            return
+        if tag in ("varref",):
+            self._add(self.m.loads, _vdecode(e.get("name")), e, "read")
+            return
+        for c in e:
+            self.walk(c, proc, gen)
+
+    def target(self, e, kind):
+        if e.tag == "varref":
+            self._add(self.m.drivers, _vdecode(e.get("name")), e, kind)
+            return
+        if e.tag in self.INDEXED:
+            kids = list(e)
+            if kids:
+                self.target(kids[0], kind)
+                for c in kids[1:]:
+                    self.loads(c)
+            return
+        for c in e:  # concat and friends: every part is a target
+            self.target(c, kind)
+
+    def loads(self, e):
+        for v in e.iter("varref"):
+            self._add(self.m.loads, _vdecode(v.get("name")), v, "read")
+
+    def instance(self, e, gen):
+        f, line, col = self.loc(e)
+        name = _vdecode(e.get("origName") or e.get("name"))
+        inst = self.m.instances.get(name)
+        if inst is None:
+            inst = Instance(name, e.get("defName"), f, line, col)
+            inst.gen = gen[-1] if gen else None
+            self.m.instances[name] = inst
+        else:
+            return  # another unrolled copy of the same instance statement
+        for p in e.findall("port"):
+            pf, pl, pc = self.loc(p)
+            toks = []
+            for c in p:
+                self._port_toks(c, toks)
+            inst.conns.append((p.get("name"), toks, pl, pc))
+            if p.get("direction") == "in":
+                for c in p:
+                    self.loads(c)
+
+    def _port_toks(self, e, toks):
+        """Tokens of a port expression: base signals plain, index signals
+        inside [ ], so that only the base counts as driven by an output."""
+        if e.tag == "varref":
+            f, line, col = self.loc(e)
+            toks.append(Tok("id", _vdecode(e.get("name")), line, col))
+        elif e.tag in self.INDEXED:
+            kids = list(e)
+            if kids:
+                self._port_toks(kids[0], toks)
+                idx_t = []
+                for c in kids[1:]:
+                    for v in c.iter("varref"):
+                        f, line, col = self.loc(v)
+                        idx_t.append(Tok("id", _vdecode(v.get("name")), line, col))
+                if idx_t:
+                    toks.append(Tok("op", "[", 0, 0))
+                    toks.extend(idx_t)
+                    toks.append(Tok("op", "]", 0, 0))
+        else:
+            for c in e:
+                self._port_toks(c, toks)
+
+
+def load_any(specs, root=None):
+    """An Index from what the user pointed at: a design JSON, a Verilator
+    XML, or sources (.f filelists, files, directories)."""
+    if len(specs) == 1 and specs[0].endswith(".json"):
+        return Index.load_json(specs[0], root=root)
+    if len(specs) == 1 and specs[0].endswith(".xml"):
+        return Index.from_verilator_xml(specs[0], root=root)
+    return Index(collect_sources(specs), root=root)
 
 
 # ---------------------------------------------------------------------------
@@ -821,6 +1124,63 @@ endmodule
 """
 
 
+SELFTEST_XML = """<?xml version="1.0" ?>
+<verilator_xml>
+  <files><file id="a" filename="@SRC@" language="1800-2017"/></files>
+  <netlist>
+    <module loc="a,2,8,2,12" name="leaf__W8" origName="leaf">
+      <var loc="a,2,28,2,29" name="W" dtype_id="1" vartype="int" origName="W" param="true"/>
+      <var loc="a,3,24,3,29" name="i_clk" dtype_id="2" dir="input" vartype="logic" origName="i_clk"/>
+      <var loc="a,4,24,4,27" name="i_d" dtype_id="3" dir="input" vartype="logic" origName="i_d"/>
+      <var loc="a,5,24,5,27" name="o_q" dtype_id="3" dir="output" vartype="logic" origName="o_q"/>
+      <var loc="a,7,17,7,20" name="r_q" dtype_id="3" vartype="logic" origName="r_q"/>
+      <always loc="a,8,3,8,12">
+        <assigndly loc="a,9,9,9,11">
+          <varref loc="a,9,12,9,15" name="i_d" dtype_id="3"/>
+          <varref loc="a,9,5,9,8" name="r_q" dtype_id="3"/>
+        </assigndly>
+      </always>
+      <contassign loc="a,11,14,11,15">
+        <varref loc="a,11,16,11,19" name="r_q" dtype_id="3"/>
+        <varref loc="a,11,10,11,13" name="o_q" dtype_id="3"/>
+      </contassign>
+    </module>
+    <module loc="a,14,8,14,11" name="top" origName="top">
+      <var loc="a,14,25,14,28" name="clk" dtype_id="2" dir="input" vartype="logic" origName="clk"/>
+      <var loc="a,14,48,14,51" name="din" dtype_id="3" dir="input" vartype="logic" origName="din"/>
+      <var loc="a,17,15,17,20" name="w_mid" dtype_id="3" vartype="logic" origName="w_mid"/>
+      <var loc="a,17,22,17,27" name="w_arr" dtype_id="4" vartype="logic" origName="w_arr"/>
+      <var loc="a,18,11,18,14" name="w_a" dtype_id="2" vartype="logic" origName="w_a"/>
+      <contassign loc="a,22,14,22,15">
+        <sel loc="a,22,19,22,20"><varref loc="a,22,16,22,19" name="din" dtype_id="3"/><const loc="a,22,20,22,21" name="1'h0"/></sel>
+        <varref loc="a,22,10,22,13" name="w_a" dtype_id="2"/>
+      </contassign>
+      <instance loc="a,30,17,30,23" name="u_leaf" defName="leaf__W8" origName="u_leaf">
+        <port loc="a,30,26,30,31" name="i_clk" direction="in"><varref loc="a,30,32,30,35" name="clk"/></port>
+        <port loc="a,30,38,30,41" name="i_d" direction="in"><varref loc="a,30,42,30,45" name="din"/></port>
+        <port loc="a,30,48,30,51" name="o_q" direction="out"><varref loc="a,30,52,30,57" name="w_mid"/></port>
+      </instance>
+      <begin loc="a,31,3,31,6" name="gen_lane[1]">
+        <instance loc="a,32,10,32,13" name="u_l" defName="leaf__W8" origName="u_l">
+          <port loc="a,32,16,32,21" name="i_clk" direction="in"><varref loc="a,32,16,32,21" name="clk"/></port>
+          <port loc="a,32,24,32,27" name="i_d" direction="in"><varref loc="a,32,28,32,33" name="w_mid"/></port>
+          <port loc="a,32,37,32,40" name="o_q" direction="out">
+            <arraysel loc="a,32,46,32,47"><varref loc="a,32,41,32,46" name="w_arr"/><varref loc="a,32,47,32,48" name="g"/></arraysel>
+          </port>
+        </instance>
+      </begin>
+    </module>
+  </netlist>
+  <cells>
+    <cell loc="a,14,8,14,11" name="top" submodname="top" hier="top">
+      <cell loc="a,30,17,30,23" name="u_leaf" submodname="leaf__W8" hier="top.u_leaf"/>
+      <cell loc="a,32,10,32,13" name="u_l" submodname="leaf__W8" hier="top.gen_lane__BRA__1__KET__.u_l"/>
+    </cell>
+  </cells>
+</verilator_xml>
+"""
+
+
 def run_selftest():
     import tempfile
 
@@ -860,6 +1220,25 @@ def run_selftest():
     check("loads include instance inputs", any(t["kind"] == "port_input" for t in loads))
     v = idx.module_view(leaf)
     check("module view idents", any(i[2] == "r_q" and i[3] == "signal" for i in v["idents"]))
+    js = os.path.join(d, "design.json")
+    idx.save_json(js)
+    back = Index.load_json(js)
+    check("design JSON round trip", back.trace("TOP.top", "w_mid") == idx.trace("TOP.top", "w_mid")
+          and back.trace("TOP.top.u_leaf", "i_d") == idx.trace("TOP.top.u_leaf", "i_d"))
+    xml = os.path.join(d, "t.xml")
+    with open(xml, "w") as fh:
+        fh.write(SELFTEST_XML.replace("@SRC@", p))
+    vx = Index.from_verilator_xml(xml, root=d)
+    check("verilator xml: modules and exact tree", set(vx.modules) == {"top", "leaf__W8"}
+          and vx.hier["top.gen_lane[1].u_l"] == "leaf__W8" and vx.modules["leaf__W8"].orig == "leaf")
+    check("verilator xml: drivers", [(l.line, l.kind) for l in vx.modules["leaf__W8"].drivers["r_q"]] == [(9, "always_ff")]
+          and [l.kind for l in vx.modules["top"].drivers["w_a"]] == ["assign"])
+    tr = vx.trace("TOP.top", "w_mid")
+    check("verilator xml: trace into instance", any(t["kind"] == "port_output" and t["port"] == "o_q" for t in tr))
+    tr = vx.trace("TOP.top.gen_lane[1].u_l", "i_d")
+    check("verilator xml: input up through generate", any(t["kind"] == "parent_conn" and t["signal"] == "w_mid" for t in tr))
+    check("verilator xml: index is not driven", "g" not in [t.text for t in _ids_outside_index(
+        next(c for c in vx.modules["top"].instances["u_l"].conns if c[0] == "o_q")[1])])
     print("selftest: %s" % ("PASS" if not fails else "%d FAILED" % fails))
     return 1 if fails else 0
 
@@ -871,11 +1250,15 @@ def main(argv=None):
     ap.add_argument("--trace", help="hierarchical signal name to trace")
     ap.add_argument("--loads", action="store_true")
     ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("-o", "--output", help="write the index as design JSON (waveview serve --rtl <it>)")
     a = ap.parse_args(argv)
     if a.selftest:
         return run_selftest()
-    idx = Index(collect_sources(a.sources or ["."]))
-    print("%d files, %d modules%s" % (len(idx.files), len(idx.modules),
+    idx = load_any(a.sources or ["."])
+    if a.output:
+        idx.save_json(a.output)
+        print("wrote %s (%s)" % (a.output, idx.producer))
+    print("%s: %d files, %d modules%s" % (idx.producer, len(idx.files), len(idx.modules),
                                        ", %d errors" % len(idx.errors) if idx.errors else ""))
     for e in idx.errors[:5]:
         print("  " + e)
