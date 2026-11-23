@@ -93,6 +93,7 @@ function applyState(st) {
   }
   renderNote();
   renderStatus();
+  if (typeof followSource === 'function') followSource(st);
   requestData();
   draw();
 }
@@ -318,6 +319,7 @@ function fetchValues() {
     } catch (e) { S.vals = {}; }
     renderValues();
     renderReadout();
+    if (SRC.open) srcAnnot();
   }, 30);
 }
 
@@ -928,6 +930,9 @@ window.addEventListener('resize', () => { requestData(); draw(); });
 const namesEl = $('names');
 namesEl.addEventListener('click', (e) => {
   const r = e.target.closest('.r'); if (!r) return;
+  // the first click re-renders the rows, so a dblclick event would land on a
+  // detached element: count clicks here instead
+  if (e.detail === 2) { traceSignal(S.rows[+r.dataset.i].name, e.shiftKey); return; }
   selectRow(+r.dataset.i, e);
 });
 namesEl.addEventListener('dragstart', (e) => {
@@ -1040,6 +1045,7 @@ document.addEventListener('keydown', (e) => {
   if (inField) return;
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') { e.preventDefault(); S.selected = new Set(S.rows.map((r) => r.name)); renderRows(); pushSelect(); return; }
   if (e.ctrlKey || e.metaKey) return;
+  if (e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight') && SRC.open) { e.preventDefault(); srcHist(e.key === 'ArrowLeft' ? -1 : 1); return; }
   const k = e.key;
   const sel = () => S.rows.findIndex((r) => S.selected.has(r.name));
   switch (k) {
@@ -1063,6 +1069,7 @@ document.addEventListener('keydown', (e) => {
     case 'o': setRadix('oct'); break;
     case '/': e.preventDefault(); $('find').focus(); break;
     case 'a': openAsk(); break;
+    case 'S': $('b-src').click(); break;
     case '?': $('helpdlg').showModal(); break;
     default: return;
   }
@@ -1129,6 +1136,388 @@ $('split').addEventListener('mousedown', (e) => {
   const up = () => { window.removeEventListener('mousemove', mv); window.removeEventListener('mouseup', up); requestData(); };
   window.addEventListener('mousemove', mv); window.addEventListener('mouseup', up);
 });
+
+
+// ---------------------------------------------------------------------------
+// Source pane: the RTL of a scope with the value of every signal at the
+// cursor next to it (active annotation), and driver / load tracing that
+// follows instance ports down and input ports up, like Verdi's nTrace.
+// ---------------------------------------------------------------------------
+
+const SRC = { open: false, scope: null, view: null, line: null, hist: [], hpos: -1, cache: new Map(), sel: null, trace: null };
+const KW_RE = /\b(module|endmodule|input|output|inout|logic|wire|reg|bit|int|integer|genvar|localparam|parameter|typedef|struct|union|enum|packed|assign|always|always_ff|always_comb|always_latch|initial|begin|end|if|else|case|casez|casex|unique|priority|endcase|default|for|foreach|generate|endgenerate|function|endfunction|task|endtask|return|automatic|posedge|negedge|or|import|signed|unsigned|interface|endinterface|package|endpackage)\b/g;
+const esc = (t) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+function showSrcPane(on) {
+  SRC.open = on;
+  $('srcpane').hidden = !on;
+  $('hsplit').hidden = !on;
+  $('b-src').classList.toggle('primary', on);
+  requestData(); draw();
+}
+
+async function srcView(scope) {
+  let v = SRC.cache.get(scope);
+  if (!v || v.gen !== gen()) {
+    v = await api('/api/src/view?scope=' + encodeURIComponent(scope));
+    v.gen = gen();
+    SRC.cache.set(scope, v);
+  }
+  return v;
+}
+
+async function srcOpen(scope, line, opts) {
+  opts = opts || {};
+  let v;
+  try { v = await srcView(scope); } catch (e) { toast(e.message); return false; }
+  const same = SRC.view === v;
+  SRC.view = v; SRC.scope = scope; SRC.line = line || v.start;
+  if (opts.sel !== undefined) SRC.sel = opts.sel;
+  if (!opts.noHist) {
+    SRC.hist = SRC.hist.slice(0, SRC.hpos + 1);
+    const top = SRC.hist[SRC.hpos];
+    if (!top || top.scope !== scope || top.line !== SRC.line) { SRC.hist.push({ scope, line: SRC.line, sel: SRC.sel }); SRC.hpos = SRC.hist.length - 1; }
+  }
+  if (!SRC.open) showSrcPane(true);
+  if (!same) renderCode(); else markLines();
+  scrollToLine(SRC.line);
+  renderCrumbs();
+  srcAnnot();
+  if (!opts.quiet) cmd('source', { scope, line: SRC.line, name: SRC.sel, kind: opts.kind || null });
+  return true;
+}
+
+function renderCrumbs() {
+  const box = $('src-crumbs');
+  box.textContent = '';
+  const comps = SRC.scope.split('.');
+  comps.forEach((c, i) => {
+    if (i) box.append('.');
+    const a = document.createElement('a');
+    a.textContent = c;
+    const sc = comps.slice(0, i + 1).join('.');
+    a.onclick = () => srcOpen(sc, null);
+    a.title = 'Open ' + sc;
+    box.append(a);
+  });
+  const m = document.createElement('span'); m.className = 'mod'; m.textContent = '(' + SRC.view.module + ')';
+  box.append(m);
+  $('src-file').textContent = `${SRC.view.file}:${SRC.line}`;
+  $('src-back').disabled = SRC.hpos <= 0;
+  $('src-fwd').disabled = SRC.hpos >= SRC.hist.length - 1;
+}
+
+function renderCode() {
+  const v = SRC.view;
+  const lines = v.text.split('\n');
+  const byLine = new Map();
+  for (const id of v.idents) { if (!byLine.has(id[0])) byLine.set(id[0], []); byLine.get(id[0]).push(id); }
+  let inBlock = false;
+  const html = [];
+  const deco = (frag) => {
+    // comments and keywords in the text between identifiers
+    let out = '', rest = frag;
+    while (rest) {
+      if (inBlock) {
+        const e = rest.indexOf('*/');
+        if (e < 0) { out += `<span class="cm">${esc(rest)}</span>`; return out; }
+        out += `<span class="cm">${esc(rest.slice(0, e + 2))}</span>`; rest = rest.slice(e + 2); inBlock = false; continue;
+      }
+      const lc = rest.indexOf('//'), bc = rest.indexOf('/*');
+      const cut = [lc, bc].filter((x) => x >= 0).sort((a, b) => a - b)[0];
+      const code = cut === undefined ? rest : rest.slice(0, cut);
+      out += esc(code).replace(KW_RE, '<span class="kw">$1</span>').replace(/(\d*'[sS]?[bBoOdDhH][0-9a-fA-FxXzZ_?]+|\b\d+\b)/g, '<span class="nm">$1</span>');
+      if (cut === undefined) return out;
+      rest = rest.slice(cut);
+      if (cut === lc && (bc < 0 || lc < bc)) { out += `<span class="cm">${esc(rest)}</span>`; return out; }
+      inBlock = true;
+    }
+    return out;
+  };
+  lines.forEach((text, i) => {
+    const ln = i + 1;
+    const ids = (byLine.get(ln) || []).sort((a, b) => a[1] - b[1]);
+    let pos = 0, body = '';
+    for (const [, col, name, kind] of ids) {
+      if (col < pos) continue;
+      body += deco(text.slice(pos, col));
+      const mapped = v.signals[name] ? ' m' : '';
+      body += `<span class="id k-${kind}${mapped}" data-n="${esc(name)}" data-k="${kind}">${esc(name)}</span>`;
+      if (mapped) body += `<span class="ann" data-n="${esc(name)}"></span>`;
+      pos = col + name.length;
+    }
+    body += deco(text.slice(pos));
+    const out = ln < v.start || ln > v.end ? ' out' : '';
+    html.push(`<div class="ln${out}" data-l="${ln}"><span class="no">${ln}</span><span class="tx">${body || ' '}</span></div>`);
+  });
+  $('code').innerHTML = html.join('');
+  markLines();
+}
+
+function markLines() {
+  const code = $('code');
+  code.querySelectorAll('.ln.cur').forEach((e) => e.classList.remove('cur'));
+  const el = code.querySelector(`.ln[data-l="${SRC.line}"]`);
+  if (el) el.classList.add('cur');
+  code.querySelectorAll('.id.sel').forEach((e) => e.classList.remove('sel'));
+  if (SRC.sel) code.querySelectorAll(`.id[data-n="${CSS.escape(SRC.sel)}"]`).forEach((e) => e.classList.add('sel'));
+}
+
+function scrollToLine(line) {
+  const el = $('code').querySelector(`.ln[data-l="${line}"]`);
+  if (!el) return;
+  const box = $('code');
+  const top = el.offsetTop - box.clientHeight / 3;
+  box.scrollTop = Math.max(0, top);
+}
+
+// active annotation: values at the cursor; a value that changed at this
+// clock edge is highlighted
+let annTimer = null;
+function srcAnnot() {
+  clearTimeout(annTimer);
+  annTimer = setTimeout(async () => {
+    if (!SRC.open || !SRC.view) return;
+    const code = $('code');
+    const on = $('src-ann').checked;
+    code.querySelectorAll('.ann').forEach((e) => { e.hidden = !on || S.cursor == null; });
+    if (!on || S.cursor == null) return;
+    const v = SRC.view;
+    const want = [];
+    for (const name of Object.keys(v.signals)) for (const n of v.signals[name].slice(0, 8)) want.push(n);
+    if (!want.length) return;
+    const ci = clockInfo();
+    const tPrev = S.cursor - (ci && ci.period ? ci.period : 1);
+    let now, before;
+    try {
+      [now, before] = await Promise.all([
+        api('/api/values', { signals: want, t: S.cursor }),
+        api('/api/values', { signals: want, t: tPrev }),
+      ]);
+    } catch (e) { return; }
+    const text = {}, changed = {}, unknown = {};
+    const params = new Set(v.idents.filter((i) => i[3] === 'param').map((i) => i[2]));
+    for (const name of Object.keys(v.signals)) {
+      const ns = v.signals[name].slice(0, 8);
+      const base = SRC.scope + '.' + name;
+      const parts = [];
+      let chg = false, xx = false;
+      for (const n of ns) {
+        const bits = now.values[n];
+        if (bits == null) continue;
+        const label = n === base ? '' : n.slice(base.length).replace(/^\./, '') + '=';
+        // parameters read better in decimal
+        parts.push(label + fmtVal(bits, bits.length, params.has(name) ? 'dec' : 'hex'));
+        if (before.values[n] !== bits) chg = true;
+        if (/[xz]/.test(bits)) xx = true;
+      }
+      if (v.signals[name].length > 8) parts.push('…');
+      let t = parts.join(' ');
+      if (t.length > 48) t = t.slice(0, 47) + '…';
+      text[name] = t; changed[name] = chg; unknown[name] = xx;
+    }
+    code.querySelectorAll('.ann').forEach((e) => {
+      const n = e.dataset.n;
+      e.textContent = text[n] || '';
+      e.className = 'ann' + (unknown[n] ? ' x' : changed[n] ? ' chg' : '');
+    });
+  }, 40);
+}
+
+// tracing
+function kindLabel(r) {
+  return { always_ff: 'ff', comb: 'comb', assign: 'assign', init: 'init', read: 'read', port_output: 'inst out',
+    port_input: 'inst in', port_inout: 'inst io', parent_conn: 'parent', decl: 'decl', port: 'port' }[r.kind] || r.kind;
+}
+
+function childScope(r) {
+  // the dump scope of the instance a port connection goes into
+  const kids = SRC.cache.get(r.scope)?.children?.[r.instance];
+  return kids && kids.length ? kids[0] : r.child_scope;
+}
+
+async function traceFrom(scope, name, loads, hops) {
+  hops = hops || [];
+  let res;
+  try {
+    res = await api(`/api/src/trace?scope=${encodeURIComponent(scope)}&name=${encodeURIComponent(name)}&loads=${loads ? 1 : 0}`);
+  } catch (e) { toast(e.message); return; }
+  // follow single port hops automatically when tracing drivers: into the
+  // instance that drives it, or up to the parent that feeds an input
+  if (!loads && res.length === 1 && hops.length < 12) {
+    const r = res[0];
+    if (r.kind === 'port_output' || r.kind === 'port_inout') {
+      await srcView(r.scope).catch(() => null);
+      const child = childScope(r);
+      if (child) { hops.push(`${r.instance}.${r.port}`); return traceFrom(child, r.port, false, hops); }
+    }
+    if (r.kind === 'parent_conn' && r.signal && r.signals.length === 1) {
+      hops.push(`↑ ${r.scope.split('.').pop()}.${r.signal}`);
+      return traceFrom(r.scope, r.signal, false, hops);
+    }
+  }
+  SRC.trace = { scope, name, loads, res, hops };
+  renderTrace();
+  if (res.length) await gotoTrace(0);
+  else {
+    // nothing drives it in the sources (a tb input, a constant, a bad index): show the declaration
+    toast(`No ${loads ? 'loads' : 'drivers'} of ${name} found in the source`);
+    await srcOpen(scope, null, { sel: name });
+    const decl = SRC.view && $('code').querySelector(`.id[data-n="${CSS.escape(name)}"]`);
+    if (decl) { SRC.line = +decl.closest('.ln').dataset.l; markLines(); scrollToLine(SRC.line); renderCrumbs(); }
+  }
+}
+
+function renderTrace() {
+  const t = SRC.trace, box = $('tracelist');
+  box.hidden = !t;
+  if (!t) return;
+  box.textContent = '';
+  const h = document.createElement('div'); h.className = 'th';
+  h.textContent = `${t.loads ? 'Loads' : 'Drivers'} of ${t.name} (${t.res.length})`;
+  box.append(h);
+  for (const hop of t.hops) { const d = document.createElement('div'); d.className = 'hop'; d.textContent = 'via ' + hop; box.append(d); }
+  t.res.forEach((r, i) => {
+    const d = document.createElement('div');
+    d.className = 'ti' + (i === t.cur ? ' on' : '');
+    const where = r.instance ? `${r.instance}.${r.port}` : r.signal;
+    d.innerHTML = `<span class="k">${kindLabel(r)}</span>${esc(r.file.split('/').pop())}:${r.line}<span class="w">${esc(r.scope === t.scope ? where || '' : r.scope.split('.').slice(-2).join('.') + ' ' + (where || ''))}</span>`;
+    d.title = `${r.file}:${r.line}  in ${r.scope}`;
+    d.onclick = () => gotoTrace(i);
+    d.ondblclick = () => {
+      // go one step further from this place
+      if (r.kind.startsWith('port_') && !t.loads) { const c = childScope(r); if (c) traceFrom(c, r.port, false, [...t.hops, `${r.instance}.${r.port}`]); }
+      else if (r.kind === 'port_input' && t.loads) { const c = childScope(r); if (c) traceFrom(c, r.port, true); }
+      else if (r.kind === 'parent_conn' && r.signal) traceFrom(r.scope, r.signal, t.loads);
+    };
+    box.append(d);
+  });
+}
+
+async function gotoTrace(i) {
+  const t = SRC.trace;
+  t.cur = i;
+  const r = t.res[i];
+  const sel = r.kind === 'parent_conn' ? r.signal : (r.kind.startsWith('port_') ? r.signal : r.signal || t.name);
+  await srcOpen(r.scope, r.line, { sel, kind: t.loads ? 'loads' : 'drivers' });
+  renderTrace();
+}
+
+async function traceSignal(full, loads) {
+  let info;
+  try { info = await api('/api/src/signal?name=' + encodeURIComponent(full)); } catch (e) { toast(e.message); return; }
+  await srcView(info.scope).catch(() => null);
+  traceFrom(info.scope, info.signal, loads);
+}
+
+function srcSignalNames(name) {
+  const v = SRC.view;
+  return (v && v.signals[name]) || [];
+}
+
+function addFromSource(name) {
+  const names = srcSignalNames(name);
+  if (!names.length) { toast(`${name} is not in the dump`); return; }
+  addRows(names.slice(0, 64));
+  toast(`Added ${Math.min(64, names.length)} signal${names.length > 1 ? 's' : ''}`);
+}
+
+async function enterInstance(inst) {
+  const v = SRC.view;
+  const kids = v.children[inst];
+  if (!kids || !kids.length) { toast(`${inst} has no signals in the dump`); return; }
+  if (kids.length === 1) { await srcOpen(kids[0], null); return; }
+  SRC.trace = { scope: SRC.scope, name: inst, loads: false, hops: [], res: [] };
+  const box = $('tracelist'); box.hidden = false; box.textContent = '';
+  const h = document.createElement('div'); h.className = 'th'; h.textContent = `${inst}: ${kids.length} instances`; box.append(h);
+  for (const k of kids) {
+    const d = document.createElement('div'); d.className = 'ti'; d.textContent = k.slice(SRC.scope.length + 1);
+    d.onclick = () => srcOpen(k, null); box.append(d);
+  }
+}
+
+const codeEl = $('code');
+codeEl.addEventListener('click', (e) => {
+  const id = e.target.closest('.id'); if (!id) return;
+  const name = id.dataset.n;
+  if (e.ctrlKey || e.metaKey) { if (id.dataset.k === 'signal') addFromSource(name); return; }
+  SRC.sel = name;
+  SRC.line = +id.closest('.ln').dataset.l;
+  markLines(); renderCrumbs();
+});
+codeEl.addEventListener('auxclick', (e) => {
+  if (e.button !== 1) return;
+  const id = e.target.closest('.id'); if (id && id.dataset.k === 'signal') { e.preventDefault(); addFromSource(id.dataset.n); }
+});
+codeEl.addEventListener('dblclick', (e) => {
+  const id = e.target.closest('.id'); if (!id) return;
+  window.getSelection()?.removeAllRanges();
+  const name = id.dataset.n, k = id.dataset.k;
+  if (k === 'instance') enterInstance(name);
+  else if (k === 'module') {
+    const line = +id.closest('.ln').dataset.l;
+    const inst = Object.entries(SRC.view.instances).find(([, i]) => i.line === line);
+    if (inst) enterInstance(inst[0]);
+  } else if (k === 'signal') traceFrom(SRC.scope, name, e.shiftKey);
+});
+codeEl.addEventListener('contextmenu', (e) => {
+  const id = e.target.closest('.id'); if (!id) return;
+  e.preventDefault();
+  const name = id.dataset.n, k = id.dataset.k;
+  const items = [];
+  if (k === 'signal') {
+    items.push({ label: 'Trace drivers', fn: () => traceFrom(SRC.scope, name, false) });
+    items.push({ label: 'Trace loads', fn: () => traceFrom(SRC.scope, name, true) });
+    items.push({ label: 'Add to waveform', fn: () => addFromSource(name) });
+    items.push(null);
+    items.push({ label: 'Ask AI about this signal…', fn: () => openAsk(`What drives ${SRC.scope}.${name} and why does it have this value at the cursor?`) });
+  }
+  if (k === 'instance') items.push({ label: 'Go into ' + name, fn: () => enterInstance(name) });
+  items.push({ label: 'Copy hierarchical name', fn: () => navigator.clipboard?.writeText(SRC.scope + '.' + name) });
+  showMenu(e.clientX, e.clientY, items);
+});
+
+$('b-src').onclick = () => {
+  if (SRC.open) { showSrcPane(false); return; }
+  if (SRC.view) { showSrcPane(true); srcAnnot(); return; }
+  const sel = S.rows.find((r) => S.selected.has(r.name)) || S.rows[0];
+  if (sel) traceSignal(sel.name, false); else showSrcPane(true);
+};
+$('src-close').onclick = () => showSrcPane(false);
+$('src-ann').onchange = srcAnnot;
+function srcHist(d) {
+  const n = SRC.hpos + d;
+  if (n < 0 || n >= SRC.hist.length) return;
+  SRC.hpos = n;
+  const h = SRC.hist[n];
+  srcOpen(h.scope, h.line, { noHist: true, sel: h.sel });
+}
+$('src-back').onclick = () => srcHist(-1);
+$('src-fwd').onclick = () => srcHist(1);
+$('hsplit').addEventListener('mousedown', (e) => {
+  e.preventDefault();
+  const y0 = e.clientY, h0 = $('srcpane').offsetHeight;
+  const mv = (ev) => { document.documentElement.style.setProperty('--src-h', Math.max(80, Math.min(innerHeight - 200, h0 - (ev.clientY - y0))) + 'px'); draw(); };
+  const up = () => { window.removeEventListener('mousemove', mv); window.removeEventListener('mouseup', up); requestData(); };
+  window.addEventListener('mousemove', mv); window.addEventListener('mouseup', up);
+});
+
+// a double-click on a waveform row traces its drivers (Shift: its loads)
+canvas.addEventListener('dblclick', (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const i = rowAtY(e.clientY - rect.top);
+  if (i >= 0) traceSignal(S.rows[i].name, e.shiftKey);
+});
+
+// the agent (or another browser) moved the source view
+let lastSourceAt = 0;
+function followSource(st) {
+  const src = st.source;
+  if (!src || !src.at || src.at === lastSourceAt) return;
+  lastSourceAt = src.at;
+  if (st.last && st.last.client === S.client) return;
+  srcOpen(src.scope, src.line, { sel: src.signal, quiet: true });
+}
 
 // ---------------------------------------------------------------------------
 

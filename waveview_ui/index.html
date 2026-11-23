@@ -21,6 +21,7 @@
   <span class="lbl">Δ</span><span id="dlt" class="val">-</span>
   <span class="sep"></span>
   <input id="find" spellcheck="false" placeholder="Search: commit_valid &amp;&amp; pc == 0x80000040  (Enter next · Shift+Enter prev)">
+  <button id="b-src" title="Source view with active annotation (S). Double-click a signal to trace its drivers">Source</button>
   <button id="b-ask" class="primary" title="Send the current view and a message to the AI agent">Send to AI</button>
   <a id="b-gtkw" class="btn" href="/api/export.gtkw" title="Save the signal list as a GTKWave save file">.gtkw</a>
   <button id="b-theme" title="Light / dark">◐</button>
@@ -41,6 +42,21 @@
     <div id="values-col"><div class="colhdr">Value</div><div id="values"></div><div class="tail"></div></div>
   </div>
   <div id="wavebox"><canvas id="wave"></canvas></div>
+</div>
+<div id="hsplit" hidden title="Drag to resize"></div>
+<div id="srcpane" hidden>
+  <div id="srcbar">
+    <button id="src-back" title="Back (Alt+←)">◀</button><button id="src-fwd" title="Forward (Alt+→)">▶</button>
+    <span id="src-crumbs"></span>
+    <span class="grow"></span>
+    <span id="src-file" class="dim"></span>
+    <label class="chk" title="Show the value at the cursor next to each signal"><input type="checkbox" id="src-ann" checked> Active annotation</label>
+    <button id="src-close" title="Close (S)">×</button>
+  </div>
+  <div id="srcbody">
+    <div id="tracelist" hidden></div>
+    <div id="code" tabindex="0"><div class="empty">Double-click a signal in the waveform to jump to its driver.<br>In the source: double-click a signal to trace its drivers (Shift: its loads), double-click an instance to go into it, Ctrl+click to add a signal to the waveform, right-click for more.</div></div>
+  </div>
 </div>
 <div id="status">
   <span id="st-conn" class="pill">connecting…</span>
@@ -77,6 +93,9 @@
       <tr><th>Delete</th><td>Remove selected rows</td><th>Ctrl+A</th><td>Select all rows</td></tr>
       <tr><th>h d s b o</th><td>Radix hex/dec/signed/bin/oct</td><th>/ or Ctrl+F</th><td>Search</td></tr>
       <tr><th>a</th><td>Send to AI</td><th>Esc</th><td>Clear selection, close menus</td></tr>
+      <tr><th>Double-click row</th><td>Trace drivers in the source</td><th>S</th><td>Show / hide the source pane</td></tr>
+      <tr><th>Source: double-click</th><td>Drivers (Shift: loads); instance: go in</td><th>Source: Ctrl+click</th><td>Add the signal to the waveform</td></tr>
+      <tr><th>Alt+← / →</th><td>Source history back / forward</td><th></th><td></td></tr>
     </table>
     <p class="dim">Signals: double-click in the signal list or drag them onto the wave rows. Drag rows to reorder. Right-click a row for radix and more.</p>
     <div class="dlgbtns"><button value="ok" class="primary">Close</button></div>

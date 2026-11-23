@@ -58,6 +58,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import wave2img as w2i  # noqa: E402
 import wavequery as wq  # noqa: E402
+import rtlindex  # noqa: E402
 
 UI_DIR = os.path.join(HERE, "waveview_ui")
 DEFAULT_PORT = 8765
@@ -84,7 +85,7 @@ def registry_dir():
 class Hub:
     """The loaded dump, the shared view state, and the push channel."""
 
-    def __init__(self, dump_path, gtkw=None):
+    def __init__(self, dump_path, gtkw=None, rtl=None):
         self.dump_path = os.path.abspath(dump_path)
         self.state_path = self.dump_path + ".waveview.json"
         self.lock = threading.RLock()
@@ -105,9 +106,17 @@ class Hub:
             "clock": None,
             "note": None,  # {text, source, at}
             "annotations": [],  # [{time, label, source}]
+            "source": None,  # {scope, line, signal, kind} shown in the source pane
             "last": None,  # {op, source, client, at}
         }
         self.tiles = collections.OrderedDict()
+        self.rtl_specs = rtl
+        self.src = None
+        self.src_status = "not indexed"
+        self.src_mtimes = {}
+        self.src_checked = 0.0
+        if rtl is not None:
+            threading.Thread(target=self.build_index, daemon=True).start()
         self.clockinfo = None
         self._restore()
         if gtkw:
@@ -547,6 +556,126 @@ class Hub:
             self.state["view"] = [t - span / 2, t + span / 2]
         return {"found": True, "time": t, "cycle": hit}
 
+    # -- source (RTL) ---------------------------------------------------------
+
+    def build_index(self):
+        specs = self.rtl_specs or ["."]
+        self.src_status = "indexing"
+        t0 = time.time()
+        files = rtlindex.collect_sources(specs)
+        if specs == ["."]:
+            files = [f for f in files if "/vendor/" not in f and "/third_party/" not in f and "/obj_dir" not in f]
+        idx = rtlindex.Index(files)
+        mt = {}
+        for f in files:
+            try:
+                mt[f] = os.stat(f).st_mtime_ns
+            except OSError:
+                pass
+        with self.lock:
+            self.src = idx
+            self.src_mtimes = mt
+            self.src_status = "%d modules from %d files (%.1fs)" % (len(idx.modules), len(files), time.time() - t0)
+        sys.stderr.write("waveview: source index: %s\n" % self.src_status)
+
+    def index(self):
+        """The source index, rebuilt when a source file changed."""
+        if self.src is None:
+            raise wq.QueryError("no source index (%s). Start the viewer with --rtl <filelist.f or dir>"
+                                % self.src_status)
+        now = time.time()
+        if now - self.src_checked > 2:
+            self.src_checked = now
+            for f, m in self.src_mtimes.items():
+                try:
+                    if os.stat(f).st_mtime_ns != m:
+                        self.build_index()
+                        break
+                except OSError:
+                    continue
+        return self.src
+
+    def dump_names(self, scope):
+        """Dump signals directly in `scope`, grouped by source identifier:
+        'w_x' -> ['scope.w_x'], arrays 'w_a' -> ['scope.w_a[0]', ...],
+        structs 'w_s' -> ['scope.w_s.f1', ...]."""
+        pre = scope + "."
+        out = {}
+        for s in self.wave.signals:
+            n = s.name
+            if not n.startswith(pre):
+                continue
+            rest = n[len(pre):]
+            base = re.split(r"[.\[(]", rest, maxsplit=1)[0]
+            out.setdefault(base, []).append(n)
+        return out
+
+    def child_scopes(self, scope, mod):
+        """instance name -> dump scopes of it (through generate scopes)."""
+        pre = scope + "."
+        found = {}
+        for s in self.wave.signals:
+            if not s.name.startswith(pre):
+                continue
+            comps = s.name[len(pre):].split(".")[:-1]
+            path = scope
+            for c in comps:
+                path += "." + c
+                base = rtlindex.Index._strip(c)
+                if base in mod.instances:
+                    found.setdefault(base, [])
+                    if path not in found[base]:
+                        found[base].append(path)
+                    break
+                if base not in mod.gen_labels:
+                    break
+        return found
+
+    def src_view(self, scope):
+        idx = self.index()
+        mod, rest = idx.resolve_scope(scope)
+        if mod is None:
+            raise wq.QueryError("scope %s is not in the source index" % scope)
+        v = idx.module_view(mod)
+        v["scope"] = scope
+        names = self.dump_names(scope)
+        v["signals"] = {k: names[k][:64] for k in {i[2] for i in v["idents"] if i[3] in ("signal", "param")} if k in names}
+        v["children"] = self.child_scopes(scope, mod)
+        up = idx.parent_scope(scope)
+        v["parent"] = up[0] if up else None
+        return v
+
+    def src_signal(self, full):
+        """Where a dump signal comes from: scope, module, declaration and the
+        drivers, following the hierarchy."""
+        idx = self.index()
+        scope, mod, name = idx.split_signal(full)
+        if mod is None:
+            raise wq.QueryError("cannot place %s in the source; is its module in --rtl?" % full)
+        d = idx.describe(mod, name)
+        d.update(scope=scope, signal=name, drivers=idx.trace(scope, name), loads=idx.trace(scope, name, loads=True))
+        return d
+
+    def src_trace(self, scope, name, loads):
+        return self.index().trace(scope, name, loads=loads)
+
+    def op_source(self, a):
+        """Show a place in the source pane: a signal's driver, or scope+line."""
+        if a.get("signal"):
+            full = a["signal"]
+            if full not in self.wave.by_name:
+                full = self.wave.resolve(full).name
+            info = self.src_signal(full)
+            target = (info["loads"] if a.get("loads") else info["drivers"]) or ([info["decl"]] if info["decl"] else [])
+            first = target[0] if target else {"line": None}
+            self.state["source"] = {"scope": first.get("scope", info["scope"]), "line": first.get("line"),
+                                    "signal": info["signal"], "kind": "loads" if a.get("loads") else "drivers",
+                                    "full": full, "at": time.time()}
+        else:
+            self.state["source"] = {"scope": a["scope"], "line": a.get("line"), "signal": a.get("name"),
+                                    "kind": a.get("kind"), "at": time.time()}
+        return self.state["source"]
+
     def op_ask(self, a):
         """A message from the person in the browser to the agent."""
         msg = {
@@ -663,6 +792,7 @@ class Hub:
             "selected": st["selected"],
             "note": st["note"],
             "annotations": st["annotations"],
+            "source": st.get("source"),
             "signals": [],
         }
         for s in st["signals"]:
@@ -818,6 +948,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 with hub.lock:
                     return self._send(200, hub.export_gtkw(), "text/plain",
                                       {"Content-Disposition": 'attachment; filename="waveview.gtkw"'})
+            if path == "/api/src/view":
+                with hub.lock:
+                    return self._send(200, hub.src_view(query["scope"][0]))
+            if path == "/api/src/signal":
+                with hub.lock:
+                    return self._send(200, hub.src_signal(query["name"][0]))
+            if path == "/api/src/status":
+                return self._send(200, {"status": hub.src_status, "ready": hub.src is not None})
+            if path == "/api/src/trace":
+                with hub.lock:
+                    return self._send(200, hub.src_trace(query["scope"][0], query["name"][0],
+                                                         query.get("loads", ["0"])[0] == "1"))
             if path == "/api/inbox":
                 return self._inbox(query)
             if method == "POST":
@@ -924,7 +1066,7 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 
 def cmd_serve(args):
-    hub = Hub(args.dump, gtkw=args.gtkw)
+    hub = Hub(args.dump, gtkw=args.gtkw, rtl=args.rtl or (["."] if not args.no_rtl else None))
     token = args.token or secrets.token_urlsafe(16)
     Handler.hub = hub
     Handler.token = token
@@ -1078,6 +1220,9 @@ def print_snapshot(snap, radix="hex"):
         print("label   %s  %s" % (_t(a["time"]), a["label"]))
     if snap["selected"]:
         print("selected %s" % ", ".join(snap["selected"]))
+    src = snap.get("source")
+    if src and src.get("scope"):
+        print("source  %s line %s%s" % (src["scope"], src.get("line"), "  (%s)" % src["signal"] if src.get("signal") else ""))
     sigs = snap["signals"]
     if not sigs:
         print("signals (none shown)")
@@ -1103,6 +1248,64 @@ def print_snapshot(snap, radix="hex"):
         print("visible cycles (%d%s):" % (tb["total"], ", first %d shown" % len(tb["rows"]) if tb["total"] > len(tb["rows"]) else ""))
         for line in wq.text_table(["cycle", "time"] + short, tb["rows"]):
             print("  " + line)
+
+
+def _full_name(c, name):
+    names = [n for n, w in c.call("/api/signals")]
+    if name in names:
+        return name
+    hits = [n for n in names if n.endswith("." + name)]
+    if len(hits) == 1:
+        return hits[0]
+    if not hits:
+        raise wq.QueryError("no signal named %r in the dump" % name)
+    raise wq.QueryError("%r is ambiguous: %s" % (name, ", ".join(hits[:6])))
+
+
+def print_source_info(c, info, loads=False, context=0):
+    """Drivers (or loads) of a signal as source lines, each followed by the
+    values at the cursor of the signals on it: active annotation as text."""
+    st = c.call("/api/state")
+    cur = st.get("cursor")
+    print("%s.%s  (module %s)" % (info["scope"], info["signal"], info["module"]))
+    if info.get("decl"):
+        d = info["decl"]
+        print("  declared  %s:%d%s" % (d["file"], d["line"], "  (%s port)" % d["dir"] if d.get("dir") else ""))
+    places = info["loads"] if loads else info["drivers"]
+    print("  %s (%d)%s:" % ("loads" if loads else "drivers", len(places),
+                            "  values at cursor %s" % _t(cur) if cur is not None else ""))
+    views = {}
+    files = {}
+    for p in places[:40]:
+        scope = p["scope"]
+        if scope not in views:
+            try:
+                views[scope] = c.call("/api/src/view?scope=" + urllib.parse.quote(scope))
+            except wq.QueryError:
+                views[scope] = None
+        v = views[scope]
+        if v is None:
+            continue
+        lines = files.setdefault(v["file"], v["text"].split("\n"))
+        what = p["kind"]
+        if p.get("instance"):
+            what += " %s.%s" % (p["instance"], p.get("port") or "")
+        print("  %s:%d  [%s]%s" % (p["file"], p["line"], what, "" if scope == info["scope"] else "  in " + scope))
+        lo = max(1, p["line"] - context)
+        hi = min(len(lines), p["line"] + context)
+        for ln in range(lo, hi + 1):
+            print("    %5d%s %s" % (ln, ">" if ln == p["line"] else " ", lines[ln - 1].rstrip()))
+        if cur is None:
+            continue
+        on_line = sorted({i[2] for i in v["idents"] if i[0] == p["line"] and i[2] in v["signals"]})
+        names = [n for k in on_line for n in v["signals"][k][:4]]
+        if names:
+            vals = c.call("/api/values", {"signals": names, "t": cur})["values"]
+            shown = []
+            for n in names:
+                sig_w = len(vals.get(n, ""))
+                shown.append("%s=%s" % (n[len(scope) + 1:], wq.fmt(vals[n], sig_w, "hex")))
+            print("           = " + "  ".join(shown))
 
 
 def _t(t):
@@ -1184,6 +1387,15 @@ def run_client(args):
             print("message #%d from the viewer: %s" % (m["id"], m["text"]))
             print("view when it was sent:")
             print_snapshot(m["context"])
+    elif args.cmd == "src":
+        name = args.signal
+        info = c.call("/api/src/signal?name=" + urllib.parse.quote(_full_name(c, name)))
+        if j:
+            print(json.dumps(info))
+            return 0
+        print_source_info(c, info, loads=args.loads, context=args.context)
+        if args.open:
+            c.cmd("source", signal=info["scope"] + "." + info["signal"], loads=args.loads or None)
     elif args.cmd == "gtkw":
         sys.stdout.write(c.call("/api/export.gtkw"))
     return 0
@@ -1251,6 +1463,32 @@ def run_selftest():
         check("token required", False)
     except wq.QueryError:
         check("token required", True)
+    # source view: a dump whose hierarchy matches rtlindex's self test RTL
+    src_dir = os.path.join(tmp, "rtl")
+    os.makedirs(src_dir)
+    with open(os.path.join(src_dir, "t.sv"), "w") as fh:
+        fh.write(rtlindex.SELFTEST_SRC)
+    vcd2 = os.path.join(tmp, "src.vcd")
+    with open(vcd2, "w") as fh:
+        fh.write("$timescale 1ns $end\n$scope module TOP $end\n$scope module top $end\n"
+                 "$var wire 1 ! clk $end\n$var wire 8 \" w_mid [7:0] $end\n$var wire 8 # din [7:0] $end\n"
+                 "$scope module u_leaf $end\n$var wire 8 $ r_q [7:0] $end\n$var wire 8 % i_d [7:0] $end\n"
+                 "$upscope $end\n$upscope $end\n$upscope $end\n$enddefinitions $end\n"
+                 "#0\n0!\nb0 \"\nb101 #\nb0 $\nb101 %\n#5\n1!\nb101 $\nb101 \"\n#10\n0!\n")
+    hub2 = Hub(vcd2, rtl=None)
+    hub2.rtl_specs = [src_dir]
+    hub2.build_index()
+    info = hub2.src_signal("TOP.top.w_mid")
+    check("source: signal placed in module", info["module"] == "top" and info["scope"] == "TOP.top")
+    check("source: driver through instance port", any(d["kind"] == "port_output" and d["instance"] == "u_leaf"
+                                                       for d in info["drivers"]))
+    view = hub2.src_view("TOP.top")
+    check("source: view maps idents to dump names", view["signals"].get("w_mid") == ["TOP.top.w_mid"]
+          and view["children"].get("u_leaf") == ["TOP.top.u_leaf"])
+    tr = hub2.src_trace("TOP.top.u_leaf", "i_d", False)
+    check("source: input traced to parent", any(t["kind"] == "parent_conn" and t["signal"] == "din" for t in tr))
+    hub2.op_source({"signal": "u_leaf.r_q"})
+    check("source: op_source opens the driver", hub2.state["source"]["line"] == 9)
     httpd.shutdown()
     hub._save()
     check("state saved next to the dump", os.path.isfile(path + ".waveview.json"))
@@ -1269,6 +1507,10 @@ def build_parser():
     s.add_argument("--host", default="127.0.0.1", help="bind address (default 127.0.0.1)")
     s.add_argument("--token", help="fixed access token (default: random)")
     s.add_argument("--gtkw", help="load the signal list from a GTKWave save file")
+    s.add_argument("--rtl", action="append",
+                   help="RTL sources for the source view: a .f filelist, a file or a directory "
+                        "(repeatable; default: the current directory, without vendor/)")
+    s.add_argument("--no-rtl", action="store_true", help="no source view")
     s.add_argument("--open", action="store_true", help="open a local browser")
 
     client = argparse.ArgumentParser(add_help=False)
@@ -1321,6 +1563,12 @@ def build_parser():
     s.add_argument("--wait", type=int, default=0, help="block up to this many seconds for one")
     s.add_argument("--after", type=int, default=0, help="only messages with a larger id")
     sub.add_parser("gtkw", parents=[client], help="print the view as a GTKWave save file")
+    s = sub.add_parser("src", parents=[client],
+                       help="where a signal is declared and driven, with values at the cursor")
+    s.add_argument("signal", help="dump signal (full name or unique suffix)")
+    s.add_argument("--loads", action="store_true", help="show the readers instead of the drivers")
+    s.add_argument("--context", type=int, default=0, help="lines of source around each place")
+    s.add_argument("--open", action="store_true", help="also show it in the viewer's source pane")
     return p
 
 

@@ -683,6 +683,8 @@ def cmd_list(args, wave, out):
     for p in pats:
         if not any(c in p for c in "*?"):
             p = "*" + p + "*"
+        elif not p.startswith("*"):
+            p = "*" + p  # a glob names the end of the hierarchy, like -s does
         for s in wave.signals:
             if s.name not in seen and w2i._matches(s.name, p):
                 seen.add(s.name)

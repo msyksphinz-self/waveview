@@ -84,6 +84,53 @@ tools/waveview.py serve w.fst            # URL(トークン付き)が表示さ�
 フィルタ欄で Enter を押すとヒットした信号をまとめて追加。時間軸にはクロック
 立ち上がりごとのグリッドとサイクル番号が出る。
 
+## ソース表示: Active Annotation とドライバの追跡 (Verdi nTrace 風)
+
+```sh
+tools/waveview.py serve w.fst --rtl core/filelist.f --rtl core/tb/top
+```
+
+`--rtl` に filelist (.f)・ファイル・ディレクトリを渡すと RTL を索引する
+(省略時はカレントディレクトリ、vendor/ と obj_dir は除く)。索引は
+`tools/rtlindex.py` による軽量な解析で、エラボレータは使わない。
+ダンプの階層名 (`TOP.tb_scariv_top.u_dut.u_rob.r_rob_head`) をモジュール・
+インスタンス・generate ブロックをたどってソースに対応づける。ソースを編集すると
+自動で索引し直す。
+
+![ソース表示](images/waveview_source.png)
+
+| 操作 | 動作 |
+|---|---|
+| 波形の信号名・波形をダブルクリック | その信号のドライバへジャンプ (Shift でロード) |
+| ソース上の信号をダブルクリック | ドライバを追跡 (Shift+ダブルクリックでロード) |
+| ソース上のインスタンス名をダブルクリック | そのインスタンスの中へ |
+| Ctrl+クリック / 中クリック | 信号を波形に追加 |
+| 右クリック | ドライバ / ロード追跡、波形に追加、AI に質問、階層名コピー |
+| パンくずリスト | 上位階層へ |
+| ◀ ▶ / Alt+← → | 履歴 |
+| `S` | ソースペインの表示切り替え |
+
+- **Active Annotation**: ソース中の各信号の横に、カーソル時刻の値を表示する。
+  カーソルを動かすと追従し、そのクロックで値が変わった信号は黄色、x/z は赤
+- **ドライバ追跡は階層をまたぐ**: インスタンスの出力ポートにつながる信号なら
+  サブモジュールの中へ、入力ポートなら親のポート接続へ自動でたどり、実際の
+  `assign` / `always` に着くまで進む。通った経路は左のリストに `via u_rob.o_rob_head`
+  のように出る。ドライバが複数あればリストから選ぶ
+- 対応している書き方: ANSI / 非 ANSI ポート、ユーザ定義型の宣言、assign、
+  always 系の `=` `<=`、連接の左辺、名前付き・`.port`・`.*`・位置指定の接続、
+  パラメータ、インスタンス配列、generate。`ifdef は両側とも索引する
+- 解析は構文の近似なので、マクロで組み立てた信号名や interface の modport 経由の
+  接続は追えないことがある
+
+AI からは同じことをテキストで行える:
+
+```sh
+tools/waveview.py src u_rob.r_rob_head            # 宣言とドライバ、各行の信号のカーソル時刻の値
+tools/waveview.py src u_rob.r_rob_head --loads    # 読んでいる側
+tools/waveview.py src u_rob.r_rob_head --open     # ユーザーのソースペインにも表示する
+tools/rtlindex.py core/filelist.f core/tb/top --trace TOP.tb_scariv_top.u_dut.w_rob_head
+```
+
 ## AI エージェントとの連携
 
 エージェント (や任意のシェル) から CLI で同じ画面を操作できる。実行中のサーバは
@@ -115,4 +162,5 @@ HTTP API (`/api/cmd`, `/api/snapshot`, `/api/wave`, `/api/events` など) も
 ```sh
 tools/waveview.py selftest
 tools/wavequery.py --selftest
+tools/rtlindex.py --selftest
 ```

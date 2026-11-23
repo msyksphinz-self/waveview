@@ -89,3 +89,21 @@ tools/waveview.py inbox --wait 600            # wait for the user's "Send to AI"
 - `inbox` messages carry the user's view at the time they pressed the button,
   so you know which signals and which cycle they mean
 - Do not `clear` the user's signal list without being asked; add to it
+
+## From a waveform value to the RTL that made it
+
+```sh
+tools/waveview.py src u_rob.r_rob_head            # declaration + drivers, each source line
+                                                  # followed by its signals' values at the cursor
+tools/waveview.py src u_rob.r_rob_head --loads    # who reads it
+tools/waveview.py src u_rob.r_rob_head --open     # show it in the user's source pane too
+```
+
+- Work backwards: find the cycle where the value goes wrong (wavequery find),
+  put the cursor there (`goto`), then `src` the signal, pick the driver whose
+  condition holds at the cursor (the printed values tell you), and `src` the
+  inputs of that line. Repeat until the cause is found
+- A driver of kind `port_output` means it comes out of an instance: `src`
+  the port inside it (`u_rob.o_rob_head`). `parent_conn` means an input port:
+  the connected signal in the parent is next
+- Without a running viewer: `tools/rtlindex.py <filelist.f> <tb dir> --trace <full name>`
