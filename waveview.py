@@ -742,6 +742,7 @@ class Hub:
             except OSError:
                 pass
         with self.lock:
+            idx.place_roots([s.name for s in self.wave.signals])
             self.src = idx
             self.src_mtimes = mt
             self.src_status = "%s: %d modules from %d files (%.1fs)" % (
@@ -773,6 +774,7 @@ class Hub:
 
         idx.reader = reader
         with self.lock:
+            idx.place_roots([s.name for s in self.wave.signals])
             self.src = idx
             self.src_mtimes = {}
             self.src_status = "%s on %s: %d modules (%.1fs)" % (idx.producer, r.host, len(idx.modules),
@@ -873,7 +875,9 @@ class Hub:
         idx = self.index()
         scope, mod, name = idx.split_signal(full)
         if mod is None:
-            raise wq.QueryError("cannot place %s in the source; is its module in --rtl?" % full)
+            raise wq.QueryError("%s is outside the RTL given to the viewer (%d modules). Add the file that "
+                                "defines its module, such as the testbench, or give the RTL folder"
+                                % (full, len(idx.modules)))
         d = idx.describe(mod, name)
         d.update(scope=scope, signal=name, drivers=idx.trace(scope, name), loads=idx.trace(scope, name, loads=True))
         return d
@@ -1037,6 +1041,8 @@ class Hub:
                     return
                 old, self.wave = self.wave, wave
                 old.close()
+                if self.src is not None:
+                    self.src.place_roots([s.name for s in wave.signals])
                 self.mtime = sig
                 self.gen += 1
                 self._fix_state()
@@ -1872,6 +1878,26 @@ def run_selftest():
     check("source: input traced to parent", any(t["kind"] == "parent_conn" and t["signal"] == "din" for t in tr))
     hub2.op_source({"signal": "u_leaf.r_q"})
     check("source: op_source opens the driver", hub2.state["source"]["line"] == 9)
+    # a filelist without the testbench: the DUT's scope is named after no module
+    vcd_tb = os.path.join(tmp, "tb.vcd")
+    with open(vcd_tb, "w") as fh:
+        fh.write("$timescale 1ns $end\n$scope module TOP $end\n$scope module tb_x $end\n$var wire 1 ! tb_only $end\n"
+                 "$scope module u_dut $end\n$var wire 1 \" clk $end\n$var wire 8 # din [7:0] $end\n"
+                 "$var wire 8 $ w_mid [7:0] $end\n$var wire 8 ( dout [7:0] $end\n"
+                 "$scope module u_leaf $end\n$var wire 8 % r_q [7:0] $end\n$var wire 8 & i_d [7:0] $end\n"
+                 "$upscope $end\n$upscope $end\n$upscope $end\n$upscope $end\n$enddefinitions $end\n"
+                 "#0\n0!\n0\"\nb0 #\nb0 $\nb0 (\nb0 %\nb0 &\n#5\n1\"\n")
+    hub_tb = Hub(vcd_tb, rtl=None)
+    hub_tb.rtl_specs = [src_dir]
+    hub_tb.build_index()
+    placed = hub_tb.src_signal("TOP.tb_x.u_dut.w_mid")
+    check("source: DUT placed without its testbench", placed["module"] == "top" and placed["scope"] == "TOP.tb_x.u_dut")
+    check("source: instance below the placed DUT", hub_tb.src_signal("TOP.tb_x.u_dut.u_leaf.r_q")["module"] == "leaf")
+    try:
+        hub_tb.src_signal("TOP.tb_x.tb_only")
+        check("source: testbench signal is a clear error", False)
+    except wq.QueryError as exc:
+        check("source: testbench signal is a clear error", "outside the RTL" in str(exc))
     # Verdi interop: an nWave .rc in, an .rc out, and FSDB through fsdb2vcd
     rc = os.path.join(tmp, "v.rc")
     with open(rc, "w") as fh:

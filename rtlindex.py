@@ -637,6 +637,7 @@ class Index:
                 self.errors.append("%s: %s" % (f, exc))
 
     reader = None  # callable(rel path) -> text, for sources on another machine
+    anchors = {}  # dump scope -> module, see place_roots
 
     def read_text(self, rel):
         if self.reader is not None:
@@ -671,10 +672,15 @@ class Index:
         k = 0
         while k < len(comps) and self._strip(comps[k]) not in self.modules:
             k += 1
-        if k == len(comps):
-            return None, None
-        mod = self.modules[self._strip(comps[k])]
-        k += 1
+        if k < len(comps):
+            mod = self.modules[self._strip(comps[k])]
+            k += 1
+        else:
+            # no scope is named after a module: start from a placed instance
+            cut = next((c for c in range(len(comps), 0, -1) if ".".join(comps[:c]) in self.anchors), None)
+            if cut is None:
+                return None, None
+            mod, k = self.modules[self.anchors[".".join(comps[:cut])]], cut
         while k < len(comps):
             c = self._strip(comps[k])
             inst = mod.instances.get(c)
@@ -686,6 +692,34 @@ class Index:
                 return mod, comps[k:]
             k += 1
         return mod, []
+
+    def place_roots(self, names):
+        """A filelist often holds the design without its testbench, so the
+        scope of the DUT (tb.u_dut) is named after no module. Find it from the
+        dump: the scope whose signals and child scopes are the ports and
+        instances of a module that nothing in the index instantiates."""
+        self.anchors = {}
+        if self.hier:
+            return
+        kids = {}
+        for n in names:
+            comps = n.split(".")
+            for k in range(1, len(comps)):
+                kids.setdefault(".".join(comps[:k]), set()).add(self._strip(comps[k]))
+        used = {i.mtype for m in self.modules.values() for i in m.instances.values()}
+        roots = [m for m in self.modules.values() if m.name not in used]
+        for scope in sorted(kids, key=lambda s: s.count(".")):
+            if self.resolve_scope(scope)[0] is not None:
+                continue
+            scored = []
+            for m in roots:
+                parts = set(m.ports) | set(m.instances)
+                hits = len(parts & kids[scope])
+                if hits >= 2 and hits / len(parts) >= 0.6:
+                    scored.append((hits / len(parts), m.name))
+            scored.sort(reverse=True)
+            if scored and (len(scored) == 1 or scored[0][0] > scored[1][0]):
+                self.anchors[scope] = scored[0][1]
 
     def _resolve_hier(self, comps):
         """Exact lookup in an elaborated instance tree. The dump may carry a

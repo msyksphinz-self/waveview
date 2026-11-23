@@ -129,8 +129,14 @@ class Remote:
 d="$HOME/.cache/waveview/wavesrv/%s"
 if [ -x "$d/fstsrv" ]; then echo "ok $d/fstsrv"; cat > /dev/null; exit 0; fi
 mkdir -p "$d" && cat > "$d/fstsrv.c" || exit 3
-R=$(verilator --getenv VERILATOR_ROOT 2>/dev/null)
-[ -n "$R" ] || R="$VERILATOR_ROOT"
+# ssh runs this without a login shell, so a PATH set in ~/.profile is not here
+R=""
+for c in "$(verilator --getenv VERILATOR_ROOT 2>/dev/null)" "$VERILATOR_ROOT" \
+    "$("${SHELL:-sh}" -lc 'verilator --getenv VERILATOR_ROOT' 2>/dev/null </dev/null | tail -n 1)" \
+    "$HOME/.local/share/verilator" /usr/local/share/verilator /usr/share/verilator \
+    "$HOME/oss-cad-suite/share/verilator"; do
+  if [ -n "$c" ] && [ -f "$c/include/gtkwave/fstapi.c" ]; then R=$c; break; fi
+done
 I="$R/include/gtkwave"
 if [ ! -f "$I/fstapi.c" ]; then echo "no-fst-lib"; exit 0; fi
 CC=${CC:-cc}
