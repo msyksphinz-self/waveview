@@ -48,6 +48,16 @@ From Windows, with the dump on a Linux build server:
 waveview.cmd serve build01:/work/sim/w.fst --rtl build01:/work/proj/rtl/filelist.f --rtl-root /work/proj --open
 ```
 
+### Standalone Windows executable
+
+`waveview.exe` needs no Python, Verilator or C compiler. Double-click it and
+pick a dump, or drop a `.fst` / `.vcd` / `.fsdb` on it. FSDB still needs Verdi's
+`fsdb2vcd`. With arguments it is the normal command line:
+`waveview.exe serve w.fst --open`.
+
+To build it, run `./build_windows.sh` from WSL with a Windows Python on `PATH`
+and Verilator installed. The result is `dist/waveview.exe`.
+
 ## Files
 
 | File | What |
@@ -58,6 +68,7 @@ waveview.cmd serve build01:/work/sim/w.fst --rtl build01:/work/proj/rtl/filelist
 | `remote.py` | ssh transport, remote build of `fstsrv`, remote RTL index |
 | `rtlindex.py` | SystemVerilog index (heuristic, Verilator `--xml-only`, or design JSON) |
 | `wave2img.py`, `fst2vcd_mini.c` | VCD parser; draws a timing diagram to SVG/PNG (needs matplotlib) |
+| `build_windows.sh` | builds the standalone `dist/waveview.exe` |
 | `docs/guide_ja.md` | user guide (Japanese) |
 | `docs/waveview_design_format.md` | design JSON format, for exporters (e.g. from a Verdi KDB) |
 | `.claude/skills/wave-debug/` | Claude Code skill: how an agent debugs with these tools |

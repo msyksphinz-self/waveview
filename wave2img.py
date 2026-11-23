@@ -315,7 +315,10 @@ def build_fst_converter(verbose=True):
 def build_fst_tool(name, verbose=True):
     """Compile tools/<name>.c against Verilator's copy of the FST library.
     Returns the binary path or None. The binary is cached and only rebuilt
-    when the C source is newer."""
+    when the C source is newer. A packaged waveview.exe carries its own."""
+    bundle = getattr(sys, "_MEIPASS", None)
+    if bundle and os.path.isfile(os.path.join(bundle, name + ".exe")):
+        return os.path.join(bundle, name + ".exe")
     source = os.path.join(os.path.dirname(os.path.abspath(__file__)), name + ".c")
     if not os.path.isfile(source):
         return None

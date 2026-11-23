@@ -1642,10 +1642,16 @@ def run_selftest():
           and hub3.state["signals"][1]["radix"] == "sdec" and hub3.state["cursor"] == 50 and hub3.state["view"] == [10, 90])
     out_rc = hub3.export_rc()
     check("nWave .rc export", "addSignal -h 15 -2COMP -DEC /tb_wave/dut/data[15:0]" in out_rc and "cursor 50.000000" in out_rc)
-    fake = os.path.join(tmp, "fsdb2vcd")
-    with open(fake, "w") as fh:
-        fh.write('#!/bin/sh\n# stand-in for Verdi\'s fsdb2vcd: <in> -o <out>\ncp "%s" "$3"\n' % path)
-    os.chmod(fake, 0o755)
+    # stand-in for Verdi's fsdb2vcd: <in> -o <out>
+    if os.name == "nt":
+        fake = os.path.join(tmp, "fsdb2vcd.cmd")
+        with open(fake, "w") as fh:
+            fh.write('@copy /y "%s" "%%~3" >nul\n' % path)
+    else:
+        fake = os.path.join(tmp, "fsdb2vcd")
+        with open(fake, "w") as fh:
+            fh.write('#!/bin/sh\ncp "%s" "$3"\n' % path)
+        os.chmod(fake, 0o755)
     fsdb = os.path.join(tmp, "t.fsdb")
     with open(fsdb, "w") as fh:
         fh.write("stand-in")
@@ -1787,7 +1793,53 @@ def build_parser():
     return p
 
 
+def pick_dump():
+    """Ask for a dump with the native file dialog. None when cancelled."""
+    import tkinter
+    from tkinter import filedialog
+
+    root = tkinter.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    path = filedialog.askopenfilename(
+        parent=root, title="waveview: open a waveform",
+        filetypes=[("Waveforms", "*.fst *.vcd *.fsdb"), ("All files", "*.*")])
+    root.destroy()
+    return os.path.normpath(path) if path else None
+
+
+def desktop_argv(argv):
+    """The packaged exe started from Explorer: no arguments (double click) or
+    one dump (dropped on the exe, or "Open with"). Anything else is the normal
+    command line. Returns None when the file dialog is cancelled. The source
+    view stays off: the working directory of a double click is not a project."""
+    if len(argv) > 1 or (argv and not argv[0].lower().endswith((".fst", ".vcd", ".fsdb"))):
+        return argv
+    dump = argv[0] if argv else pick_dump()
+    return ["serve", dump, "--no-rtl", "--open"] if dump else None
+
+
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if not getattr(sys, "frozen", False):
+        return run_command(argv)
+    launched = desktop_argv(argv)
+    if launched is None:
+        return 0
+    if launched is argv:
+        return run_command(argv)
+    # started from Explorer: keep the console open so an error can be read
+    try:
+        rc = run_command(launched)
+    except Exception as exc:
+        print("error: %s" % exc, file=sys.stderr)
+        rc = 1
+    if rc:
+        input("Press Enter to close...")
+    return rc
+
+
+def run_command(argv):
     args = build_parser().parse_args(argv)
     try:
         if args.cmd == "serve":
