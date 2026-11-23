@@ -65,15 +65,19 @@ class ArithEdges:
 class LazyFst(wq.Wave):
     lazy = True
 
-    def __init__(self, path):
-        binary = w2i.build_fst_tool("fstsrv", verbose=True)
-        if binary is None:
-            raise wq.QueryError("cannot build tools/fstsrv.c (needs a C compiler and Verilator's FST library)")
+    def __init__(self, path, argv=None):
+        if argv is None:
+            binary = w2i.build_fst_tool("fstsrv", verbose=True)
+            if binary is None:
+                raise wq.QueryError("cannot build tools/fstsrv.c (needs a C compiler and Verilator's FST library)")
+            argv = [binary, path]
         self.path = path
-        self.proc = subprocess.Popen([binary, path], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                     text=True, bufsize=1 << 16)
+        self.proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     text=True, bufsize=1 << 16, encoding="ascii", errors="replace")
         self.io = threading.Lock()
         head = self.proc.stdout.readline().strip()
+        if not head and self.proc.poll() is not None:
+            raise wq.QueryError("the wave server for %s exited (%d)" % (path, self.proc.returncode))
         if head != "wavesrv 1":
             raise wq.QueryError("fstsrv could not open %s: %s" % (path, head))
         dump = w2i.Dump()
@@ -118,6 +122,15 @@ class LazyFst(wq.Wave):
                 self.proc.kill()
         except Exception:  # noqa: BLE001
             pass
+
+    def stamp(self):
+        """(size, mtime) of the dump, to notice when the simulation rewrote it."""
+        if not getattr(self, "remote", None):
+            st = os.stat(self.path)
+            return (st.st_size, st.st_mtime_ns)
+        out = self._ask("stat")
+        _, size, mtime = out[0].split()
+        return (int(size), int(mtime))
 
     # -- protocol -------------------------------------------------------------
 
@@ -324,8 +337,35 @@ def _timescale(exp):
     return "1e%ds" % exp
 
 
+class RemoteFst(LazyFst):
+    """An FST on another machine, read through fstsrv over ssh (remote.py)."""
+
+    def __init__(self, spec):
+        import remote
+
+        r, path = remote.parse(spec)
+        self.remote = r
+        for attempt in (0, 1):
+            try:
+                super().__init__(spec, argv=r.fstsrv_argv(path))
+                return
+            except remote.RemoteError as exc:
+                raise wq.QueryError(str(exc))
+            except wq.QueryError:
+                if attempt:
+                    raise
+                # the remembered binary may be gone (a cleaned cache): build again
+                r.forget_fstsrv()
+
+
 def open_lazy(path):
     """A lazy source for path, or None when this format has none."""
+    import remote
+
+    if remote.is_remote(path):
+        if not path.lower().endswith(".fst"):
+            raise wq.QueryError("remote dumps are served for FST only (convert or dump FST on the server)")
+        return RemoteFst(path)
     if path.lower().endswith(".fst") and os.environ.get("WAVE_EAGER") != "1":
         return LazyFst(path)
     return None

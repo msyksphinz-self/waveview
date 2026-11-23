@@ -26,6 +26,10 @@ Why it is built this way:
   the next start. --gtkw loads a GTKWave save file, and /api/export.gtkw
   writes one, so the same signal list opens in GTKWave too
 
+From a desktop (Windows included) the dump can stay on the build server:
+`serve build01:/work/sim/w.fst` reads it through tools/fstsrv.c running there
+over ssh (tools/remote.py); only what the view asks for crosses the link.
+
 Security: the server binds to 127.0.0.1 and every request needs a random
 token (in the printed URL, then a cookie). On a shared server other users
 cannot read the dump through it.
@@ -41,9 +45,11 @@ import argparse
 import bisect
 import collections
 import gzip
+import hashlib
 import http.server
 import json
 import os
+import platform
 import queue
 import re
 import secrets
@@ -59,6 +65,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import wave2img as w2i  # noqa: E402
 import wavequery as wq  # noqa: E402
+import remote  # noqa: E402
 import rtlindex  # noqa: E402
 
 UI_DIR = os.path.join(HERE, "waveview_ui")
@@ -87,12 +94,19 @@ class Hub:
     """The loaded dump, the shared view state, and the push channel."""
 
     def __init__(self, dump_path, gtkw=None, rtl=None, rc=None):
-        self.dump_path = os.path.abspath(dump_path)
-        self.state_path = self.dump_path + ".waveview.json"
+        if remote.is_remote(dump_path):
+            # a dump on another machine: the view state is kept here
+            self.dump_path = dump_path
+            key = hashlib.sha1(dump_path.encode()).hexdigest()[:16]
+            self.state_path = os.path.join(registry_dir(), "state", key + ".json")
+            os.makedirs(os.path.dirname(self.state_path), exist_ok=True)
+        else:
+            self.dump_path = os.path.abspath(dump_path)
+            self.state_path = self.dump_path + ".waveview.json"
         self.lock = threading.RLock()
         self.wave = wq.load(self.dump_path)
         self.gen = 1
-        self.mtime = os.stat(self.dump_path).st_mtime_ns
+        self.mtime = self._stamp()
         self.subscribers = []
         self.inbox = []
         self.inbox_cv = threading.Condition(self.lock)
@@ -112,6 +126,7 @@ class Hub:
         }
         self.tiles = collections.OrderedDict()
         self.rtl_specs = rtl
+        self.rtl_root = os.environ.get("WAVEVIEW_RTL_ROOT")  # remote: base of the shown file names
         self.src = None
         self.src_status = "not indexed"
         self.src_mtimes = {}
@@ -630,6 +645,9 @@ class Hub:
         self.src_status = "indexing"
         t0 = time.time()
         try:
+            if specs and remote.is_remote(specs[0]):
+                self._build_remote_index(specs, t0)
+                return
             if len(specs) == 1 and specs[0].endswith((".json", ".xml")):
                 # an elaborated design: Verilator --xml-only, or design JSON
                 # from any exporter (e.g. one reading a Verdi KDB / daidir)
@@ -657,6 +675,44 @@ class Hub:
             self.src_status = "%s: %d modules from %d files (%.1fs)" % (
                 idx.producer, len(idx.modules), len(files), time.time() - t0)
         sys.stderr.write("waveview: source index: %s\n" % self.src_status)
+
+    def _build_remote_index(self, specs, t0):
+        """Index RTL on the server (rtlindex.py runs there over ssh) and fetch
+        the files the source pane opens, once each."""
+        parsed = [remote.parse(s) for s in specs]
+        if any(p is None or p[0].host != parsed[0][0].host for p in parsed):
+            raise wq.QueryError("--rtl over ssh: all entries must be on the same host")
+        r = parsed[0][0]
+        paths = [p for _, p in parsed]
+        root = self.rtl_root or __import__("posixpath").dirname(paths[0])
+        doc = r.index_rtl(paths, root)
+        idx = rtlindex.Index.from_doc(doc)
+        rroot = doc.get("root") or root
+        cache = {}
+
+        def reader(rel, _cache=cache):
+            full = rel if rel.startswith("/") else rroot.rstrip("/") + "/" + rel
+            if full not in _cache:
+                got = r.read_files([full])
+                if full not in got:
+                    raise wq.QueryError("cannot read %s on %s" % (full, r.host))
+                _cache[full] = got[full]
+            return _cache[full]
+
+        idx.reader = reader
+        with self.lock:
+            self.src = idx
+            self.src_mtimes = {}
+            self.src_status = "%s on %s: %d modules (%.1fs)" % (idx.producer, r.host, len(idx.modules),
+                                                               time.time() - t0)
+        sys.stderr.write("waveview: source index: %s\n" % self.src_status)
+
+    def _stamp(self):
+        stamp = getattr(self.wave, "stamp", None)
+        if stamp is not None:
+            return stamp()
+        st = os.stat(self.dump_path)
+        return (st.st_size, st.st_mtime_ns)
 
     def index(self):
         """The source index, rebuilt when a source file changed."""
@@ -881,11 +937,11 @@ class Hub:
         while True:
             time.sleep(1.0)
             try:
-                st = os.stat(self.dump_path)
-            except OSError:
+                with self.lock:
+                    sig = self._stamp()
+            except (OSError, wq.QueryError):
                 continue
-            sig = (st.st_mtime_ns, st.st_size)
-            if st.st_mtime_ns == self.mtime:
+            if sig == self.mtime:
                 last_seen = None
                 continue
             if sig != last_seen:  # still being written; wait until it settles
@@ -900,7 +956,7 @@ class Hub:
             with self.lock:
                 old, self.wave = self.wave, wave
                 old.close()
-                self.mtime = st.st_mtime_ns
+                self.mtime = sig
                 self.gen += 1
                 self._fix_state()
                 self.version += 1
@@ -1133,6 +1189,8 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 
 def cmd_serve(args):
+    if args.rtl_root:
+        os.environ["WAVEVIEW_RTL_ROOT"] = args.rtl_root
     hub = Hub(args.dump, gtkw=args.gtkw, rc=args.rc, rtl=args.rtl or (["."] if not args.no_rtl else None))
     token = args.token or secrets.token_urlsafe(16)
     Handler.hub = hub
@@ -1165,10 +1223,13 @@ def cmd_serve(args):
     signal_mod.signal(signal_mod.SIGTERM, cleanup)
     signal_mod.signal(signal_mod.SIGINT, cleanup)
     threading.Thread(target=hub.watch, daemon=True).start()
-    hostname = os.uname().nodename
+    hostname = platform.node() or "this-host"
     print("waveview: serving %s" % hub.dump_path)
     print("  open      %s?token=%s" % (url, token))
-    print("  remote    ssh -L %d:localhost:%d %s   (VS Code Remote forwards it by itself)" % (port, port, hostname))
+    if remote.is_remote(hub.dump_path):
+        print("  data      read over ssh from %s, only what the view asks for" % remote.parse(hub.dump_path)[0].host)
+    else:
+        print("  remote    ssh -L %d:localhost:%d %s   (VS Code Remote forwards it by itself)" % (port, port, hostname))
     print("  control   tools/waveview.py add '<pattern>' | goto --cycle N | look | note TEXT")
     sys.stdout.flush()
     if args.open:
@@ -1185,6 +1246,18 @@ def cmd_serve(args):
 
 
 def _alive(pid):
+    if os.name == "nt":
+        # os.kill(pid, 0) would terminate the process on Windows
+        import ctypes
+
+        k32 = ctypes.windll.kernel32
+        h = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        code = ctypes.c_ulong()
+        ok = k32.GetExitCodeProcess(h, ctypes.byref(code))
+        k32.CloseHandle(h)
+        return bool(ok) and code.value == 259  # STILL_ACTIVE
     try:
         os.kill(pid, 0)
         return True
@@ -1224,7 +1297,7 @@ class Client:
         if not url:
             ss = sessions()
             if dump:
-                want = os.path.abspath(dump)
+                want = dump if remote.is_remote(dump) else os.path.abspath(dump)
                 ss = [s for s in ss if s["dump"] == want]
             if not ss:
                 raise wq.QueryError(
@@ -1586,6 +1659,47 @@ def run_selftest():
             os.environ.pop("FSDB2VCD", None)
         else:
             os.environ["FSDB2VCD"] = old
+    # a dump and RTL on "another machine": ssh replaced by a local stand-in
+    conv = w2i.build_fst_converter(verbose=False)
+    if conv is None or os.name == "nt":
+        print("skip remote checks: needs sh and the FST tools")
+    else:
+        import subprocess
+
+        fst = os.path.join(tmp, "r.fst")
+        subprocess.run([conv, "--vcd2fst", path, "-o", fst], check=True, capture_output=True)
+        rhome = os.path.join(tmp, "remote_home")
+        os.makedirs(rhome)
+        fake = os.path.join(tmp, "fake_ssh")
+        with open(fake, "w") as fh:
+            fh.write('#!/bin/sh\n# ssh stand-in: drop options and the host, run the command here\n'
+                     'while [ $# -gt 0 ]; do case "$1" in -T|-C) shift;; -o|-p) shift 2;; *) break;; esac; done\n'
+                     'shift\ncd "%s" && HOME="%s" exec sh -c "$*"\n' % (rhome, rhome))
+        os.chmod(fake, 0o755)
+        old = os.environ.get("WAVEVIEW_SSH")
+        os.environ["WAVEVIEW_SSH"] = fake
+        try:
+            spec = "buildhost:" + fst
+            rw = wq.load(spec)
+            lw = wq.load(fst)
+            same = all(rw.value(rw.by_name[n], t) == lw.value(lw.by_name[n], t)
+                       for n in ("tb_wave.dut.data", "tb_wave.dut.req") for t in (0, 25, 50, 199))
+            check("remote: FST read over ssh", type(rw).__name__ == "RemoteFst" and same)
+            check("remote: fstsrv built and cached on the server",
+                  any(f == "fstsrv" for _, _, fs in os.walk(os.path.join(rhome, ".cache")) for f in fs))
+            check("remote: dump stamp", rw.stamp()[0] == os.path.getsize(fst))
+            rw.close()
+            lw.close()
+            r, _ = remote.parse(spec)
+            doc = r.index_rtl([src_dir], src_dir)
+            got = r.read_files([os.path.join(src_dir, "t.sv")])
+            check("remote: RTL indexed on the server and read over ssh",
+                  "leaf" in doc["modules"] and "module leaf" in got[os.path.join(src_dir, "t.sv")])
+        finally:
+            if old is None:
+                os.environ.pop("WAVEVIEW_SSH", None)
+            else:
+                os.environ["WAVEVIEW_SSH"] = old
     httpd.shutdown()
     hub._save()
     check("state saved next to the dump", os.path.isfile(path + ".waveview.json"))
@@ -1609,6 +1723,8 @@ def build_parser():
                    help="RTL sources for the source view: a .f filelist, a file or a directory "
                         "(repeatable; default: the current directory, without vendor/)")
     s.add_argument("--no-rtl", action="store_true", help="no source view")
+    s.add_argument("--rtl-root", help="for --rtl on another machine: the directory there that source paths are "
+                                       "shown relative to (default: the first entry's directory)")
     s.add_argument("--open", action="store_true", help="open a local browser")
 
     client = argparse.ArgumentParser(add_help=False)

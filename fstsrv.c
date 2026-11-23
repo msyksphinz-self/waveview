@@ -30,6 +30,8 @@
  *     at <t> <h> [<h>...]
  *         v <h> <bits>                  value at t (after the changes at t)
  *         .
+ *     stat
+ *         s <size> <mtime seconds>      of the dump file, to notice a rewrite
  *     quit
  * Errors answer "! <message>". Real and string variables are not served.
  */
@@ -39,6 +41,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <inttypes.h>
+#include <sys/stat.h>
 
 #include "fstapi.h"
 
@@ -276,6 +279,12 @@ int main(int argc, char **argv)
             q_t1 = q_t0 + (nb << q_level) - 1;
             int nh = parse_handles(tok + 4, n - 4, hl);
             run_query(hl, nh);
+        } else if (!strcmp(tok[0], "stat")) {
+            struct stat st;
+            if (stat(argv[1], &st) == 0)
+                printf("s %lld %lld\n.\n", (long long)st.st_size, (long long)st.st_mtime);
+            else
+                printf("! cannot stat %s\n", argv[1]);
         } else if (!strcmp(tok[0], "at") && n >= 3) {
             uint64_t t = strtoull(tok[1], NULL, 10);
             if (t > fstReaderGetEndTime(ctx))

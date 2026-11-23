@@ -299,11 +299,14 @@ class Wave:
 
 
 def load(path):
-    if not os.path.isfile(path):
-        raise QueryError("no such file: %s" % path)
-    # FST is read in place, on demand (tools/wavesource.py); WAVE_EAGER=1
-    # falls back to converting and loading it whole
+    # FST is read in place, on demand (tools/wavesource.py), also from another
+    # machine over ssh (host:/path/w.fst); WAVE_EAGER=1 falls back to
+    # converting and loading a local FST whole
+    import remote
     import wavesource
+
+    if not remote.is_remote(path) and not os.path.isfile(path):
+        raise QueryError("no such file: %s" % path)
 
     lazy = wavesource.open_lazy(path)
     if lazy is not None:

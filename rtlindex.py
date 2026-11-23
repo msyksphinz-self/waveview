@@ -563,11 +563,30 @@ def read_filelist(path, seen=None):
             k += 1
             continue
         if w.endswith((".sv", ".v", ".svh", ".vh")):
-            cand = w if os.path.isfile(w) else os.path.join(base, w)
-            if os.path.isfile(cand):
+            cand = _find_listed(w, base)
+            if cand:
                 out.append(os.path.abspath(cand))
         k += 1
     return out
+
+
+def _find_listed(w, base):
+    """A filelist entry: as given (relative to the current directory), else
+    relative to the filelist's directory or one of its ancestors (lists that
+    name files from the repository root)."""
+    if os.path.isabs(w):
+        return w if os.path.isfile(w) else None
+    if os.path.isfile(w):
+        return w
+    d = base
+    while True:
+        cand = os.path.join(d, w)
+        if os.path.isfile(cand):
+            return cand
+        up = os.path.dirname(d)
+        if up == d:
+            return None
+        d = up
 
 
 def collect_sources(specs):
@@ -616,6 +635,14 @@ class Index:
                     self.modules.setdefault(m.name, m)
             except Exception as exc:  # noqa: BLE001
                 self.errors.append("%s: %s" % (f, exc))
+
+    reader = None  # callable(rel path) -> text, for sources on another machine
+
+    def read_text(self, rel):
+        if self.reader is not None:
+            return self.reader(rel)
+        with open(self.abs(rel), errors="replace") as fh:
+            return fh.read()
 
     def rel(self, path):
         path = os.path.abspath(path)
@@ -793,9 +820,7 @@ class Index:
     def module_view(self, mod):
         """Identifiers in the module's line range, classified for a source
         view: signal / port / instance / module / param."""
-        path = self.abs(mod.file)
-        with open(path, errors="replace") as fh:
-            text = fh.read()
+        text = self.read_text(mod.file)
         idents = []
         sigs = set(mod.decls) | set(mod.drivers) | set(mod.loads)
         for line, col, name in ident_at_file(text):
@@ -825,7 +850,19 @@ class Index:
 
     # -- the open design JSON ---------------------------------------------------
 
+    def to_doc(self):
+        return self._doc()
+
     def save_json(self, path):
+        doc = self._doc()
+        if path in ("-", "/dev/stdout"):
+            json.dump(doc, sys.stdout, separators=(",", ":"))
+            sys.stdout.flush()
+            return
+        with open(path, "w") as fh:
+            json.dump(doc, fh, separators=(",", ":"))
+
+    def _doc(self):
         def locs(table):
             return {n: [[l.file, l.line, l.col, l.kind] for l in v] for n, v in table.items()}
 
@@ -845,17 +882,19 @@ class Index:
                                   for p, toks, ln, col in i.conns]}
                     for n, i in m.instances.items()},
             }
-        doc = {"format": "waveview-design/1", "producer": self.producer, "root": self.root,
-               "files": self.files, "modules": mods, "hier": self.hier}
-        with open(path, "w") as fh:
-            json.dump(doc, fh, separators=(",", ":"))
+        return {"format": "waveview-design/1", "producer": self.producer, "root": self.root,
+                "files": self.files, "modules": mods, "hier": self.hier}
 
     @classmethod
     def load_json(cls, path, root=None):
         with open(path) as fh:
             doc = json.load(fh)
+        return cls.from_doc(doc, root=root, name=path)
+
+    @classmethod
+    def from_doc(cls, doc, root=None, name="design"):
         if doc.get("format") != "waveview-design/1":
-            raise ValueError("%s is not a waveview design file" % path)
+            raise ValueError("%s is not a waveview design file" % name)
         idx = cls((), root=root or doc.get("root"), producer=doc.get("producer", "json"))
         idx.files = list(doc.get("files", []))
         for name, d in doc["modules"].items():
@@ -1250,13 +1289,16 @@ def main(argv=None):
     ap.add_argument("--trace", help="hierarchical signal name to trace")
     ap.add_argument("--loads", action="store_true")
     ap.add_argument("--selftest", action="store_true")
-    ap.add_argument("-o", "--output", help="write the index as design JSON (waveview serve --rtl <it>)")
+    ap.add_argument("-o", "--output", help="write the index as design JSON (waveview serve --rtl <it>); - for stdout")
+    ap.add_argument("--quiet", action="store_true", help="no summary (with -o -)")
     a = ap.parse_args(argv)
     if a.selftest:
         return run_selftest()
     idx = load_any(a.sources or ["."])
     if a.output:
         idx.save_json(a.output)
+        if a.quiet:
+            return 0
         print("wrote %s (%s)" % (a.output, idx.producer))
     print("%s: %d files, %d modules%s" % (idx.producer, len(idx.files), len(idx.modules),
                                        ", %d errors" % len(idx.errors) if idx.errors else ""))

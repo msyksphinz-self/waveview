@@ -118,6 +118,36 @@ tools/waveview.py serve sim.fsdb --rc signal.rc --rtl core/filelist.f
   書き出せる。Verdi で `File > Restore Signal` すれば同じ信号・カーソル・ズームで開く
 - wavequery / wave2img も同じ仕組みで .fsdb を読める
 
+## Windows (手元の PC) からリモートの FST を見る
+
+ビューワを手元の Windows で動かし、FST はビルドサーバに置いたまま読む。
+サーバで常駐させるものも、ポート転送も要らない。
+
+```bat
+rem 初回だけ: Python 3 (python.org か winget install Python.Python.3.12) と、
+rem サーバへ鍵で入れる ssh (Windows 10 以降は OpenSSH クライアントが標準で入っている)
+tools\waveview.cmd serve build01:/work/sim/w.fst --rtl build01:/work/scariv/core/filelist.f --rtl-root /work/scariv --open
+```
+
+- `ssh://user@host:port/abs/path` か `user@host:/abs/path` で指定する
+  (`C:/...` のような 1 文字 + `:` はドライブとして扱う)。`~/.ssh/config` の
+  別名・踏み台 (ProxyJump)・ssh-agent はそのまま使える
+- 仕組み: `fstsrv` は標準入出力で話すので、`ssh -T -C host fstsrv w.fst` で
+  サーバ側に置いたまま動く。画面が必要とする信号・時間範囲・要約だけが
+  ssh を通り、ssh の圧縮もかかる
+- サーバ側の準備は不要。初回接続時に `fstsrv.c` を ssh で送り、サーバの
+  Verilator の FST ライブラリでビルドして `~/.cache/scariv/wavesrv/` に置く。
+  場所は手元で覚えるので、2 回目からは接続 1 本で始まる (消されていたら作り直す)
+- ソース表示: `--rtl host:/path` はサーバ上で `rtlindex.py` を (ssh で送って)
+  python3 で実行して索引を作り、ソースペインで開いたファイルだけを取りに行く。
+  `--rtl-root` はファイル名を表示する基準のディレクトリ
+- シミュレーションがダンプを書き直すと、ssh 越しに検知して読み直す
+- wavequery も同じ指定で使える: `py tools\wavequery.py find build01:/work/sim/w.fst "rose(flush)"`
+- ssh コマンドは `WAVEVIEW_SSH` で差し替えられる (例 `plink -batch`)。
+  サーバに C コンパイラか Verilator がなければ、別の場所でビルドした fstsrv を
+  `WAVEVIEW_REMOTE_FSTSRV` で指定する
+- リモートは FST のみ。VCD / FSDB はサーバで waveview を動かす従来の方法 (ssh -L) で見る
+
 ## 画面と操作 (GTKWave / Verdi nWave 準拠)
 
 左に階層ツリーと信号リスト (GTKWave の SST)、中央に信号名と値 (カーソル位置)、右に波形。
