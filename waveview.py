@@ -58,6 +58,7 @@ import re
 import secrets
 import signal as signal_mod
 import socketserver
+import subprocess
 import sys
 import threading
 import time
@@ -71,6 +72,7 @@ import wavequery as wq  # noqa: E402
 import remote  # noqa: E402
 import rtlindex  # noqa: E402
 import waverc  # noqa: E402
+import opener  # noqa: E402
 
 UI_DIR = os.path.join(HERE, "waveview_ui")
 DEFAULT_PORT = 8765
@@ -108,6 +110,7 @@ class Hub:
             self.dump_path = os.path.abspath(dump_path)
             self.state_path = self.dump_path + ".waveview.json"
         self.lock = threading.RLock()
+        self.retired = False
         self.wave = wq.load(self.dump_path)
         self.gen = 1
         self.mtime = self._stamp()
@@ -739,6 +742,7 @@ class Hub:
             except OSError:
                 pass
         with self.lock:
+            idx.place_roots([s.name for s in self.wave.signals])
             self.src = idx
             self.src_mtimes = mt
             self.src_status = "%s: %d modules from %d files (%.1fs)" % (
@@ -770,6 +774,7 @@ class Hub:
 
         idx.reader = reader
         with self.lock:
+            idx.place_roots([s.name for s in self.wave.signals])
             self.src = idx
             self.src_mtimes = {}
             self.src_status = "%s on %s: %d modules (%.1fs)" % (idx.producer, r.host, len(idx.modules),
@@ -870,7 +875,9 @@ class Hub:
         idx = self.index()
         scope, mod, name = idx.split_signal(full)
         if mod is None:
-            raise wq.QueryError("cannot place %s in the source; is its module in --rtl?" % full)
+            raise wq.QueryError("%s is outside the RTL given to the viewer (%d modules). Add the file that "
+                                "defines its module, such as the testbench, or give the RTL folder"
+                                % (full, len(idx.modules)))
         d = idx.describe(mod, name)
         d.update(scope=scope, signal=name, drivers=idx.trace(scope, name), loads=idx.trace(scope, name, loads=True))
         return d
@@ -1007,8 +1014,10 @@ class Hub:
     def watch(self):
         """Reload the dump when the simulation rewrites it."""
         last_seen = None
-        while True:
+        while not self.retired:
             time.sleep(1.0)
+            if self.retired:
+                return
             try:
                 with self.lock:
                     sig = self._stamp()
@@ -1027,8 +1036,13 @@ class Hub:
                 last_seen = None
                 continue
             with self.lock:
+                if self.retired:
+                    wave.close()
+                    return
                 old, self.wave = self.wave, wave
                 old.close()
+                if self.src is not None:
+                    self.src.place_roots([s.name for s in wave.signals])
                 self.mtime = sig
                 self.gen += 1
                 self._fix_state()
@@ -1037,6 +1051,20 @@ class Hub:
                 self.broadcast("reload", self.meta())
                 self.broadcast("state", self.public_state())
             sys.stderr.write("waveview: reloaded %s (gen %d)\n" % (self.dump_path, self.gen))
+
+    def retire(self):
+        """Another dump was opened in this server: save, tell the browsers
+        to load the new one, and let go of this one."""
+        if self._save_timer is not None:
+            self._save_timer.cancel()
+        self._save()
+        with self.lock:
+            self.retired = True
+            self.broadcast("reopen", {})
+            try:
+                self.wave.close()
+            except (OSError, ValueError, subprocess.SubprocessError):
+                pass
 
     def export_gtkw(self):
         lines = [
@@ -1064,8 +1092,10 @@ STATIC_TYPES = {".html": "text/html", ".js": "text/javascript", ".css": "text/cs
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
-    hub: Hub = None
+    hub: Hub = None  # None until a dump is opened from the window
     token: str = None
+    on_open = None  # called after another dump became the current one
+    opening = threading.Lock()
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt, *args):  # quiet
@@ -1122,6 +1152,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
         try:
             if path == "/" or path.startswith("/ui/"):
                 return self._static(path)
+            if path == "/api/session":
+                return self._send(200, {"dump": hub.dump_path if hub else None})
+            if path == "/api/hosts":
+                return self._send(200, {"hosts": opener.ssh_hosts()})
+            if method == "POST" and path == "/api/ls":
+                return self._list_dir(self._body())
+            if method == "POST" and path == "/api/open":
+                return self._open_dump(self._body())
+            if hub is None:
+                return self._send(409, {"error": "no dump is open yet"})
             if path == "/api/events":
                 return self._events()
             if path == "/api/meta":
@@ -1185,12 +1225,45 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         t = hub.next_edge(body["signal"], float(body["t"]), body.get("dir", "next"))
                         return self._send(200, {"time": t})
             return self._send(404, {"error": "no such endpoint %s" % path})
-        except wq.QueryError as exc:
+        except (wq.QueryError, remote.RemoteError) as exc:
             return self._send(400, {"error": str(exc)})
         except (KeyError, ValueError, TypeError) as exc:
             return self._send(400, {"error": "bad request: %r" % exc})
         except (BrokenPipeError, ConnectionResetError):
             return None
+
+    def _list_dir(self, body):
+        host, path = body.get("host") or "", body.get("path") or ""
+        try:
+            return self._send(200, opener.list_remote(host, path) if host else opener.list_local(path))
+        except OSError as exc:
+            raise wq.QueryError("cannot list %s: %s" % (path or "the folder", exc.strerror or exc))
+
+    def _open_dump(self, body):
+        """Load the dump first: if that fails, the current view stays."""
+        host, path, rtl = body.get("host") or "", body["path"], (body.get("rtl") or "").strip()
+        if host:
+            r = opener.remote_for(host)
+            if not path.startswith("/") or (rtl and not rtl.startswith("/")):
+                raise wq.QueryError("paths on the server must be absolute")
+            base = "ssh://%s%s" % (r.host, ":%s" % r.port if r.port else "")
+            path, rtl = base + path, base + rtl if rtl else ""
+        if not Handler.opening.acquire(blocking=False):
+            return self._send(409, {"error": "another dump is being opened"})
+        try:
+            try:
+                new = Hub(path, rtl=[rtl] if rtl else None)
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise wq.QueryError("cannot open %s: %s" % (path, exc))
+            old, Handler.hub = Handler.hub, new
+            threading.Thread(target=new.watch, daemon=True).start()
+            if Handler.on_open:
+                Handler.on_open()
+            if old is not None:
+                old.retire()
+        finally:
+            Handler.opening.release()
+        return self._send(200, {"dump": new.dump_path})
 
     def do_GET(self):
         self._route("GET")
@@ -1264,18 +1337,25 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
+    def handle_error(self, request, client_address):
+        # a browser that went away is normal (on Windows it shows as a reset)
+        if not isinstance(sys.exc_info()[1], ConnectionError):
+            super().handle_error(request, client_address)
+
 
 def cmd_serve(args):
     if args.rtl_root:
         os.environ["WAVEVIEW_RTL_ROOT"] = args.rtl_root
-    if args.dump is None:
-        if not args.rc:
-            raise wq.QueryError("serve needs a dump, or --rc FILE with a 'dump' line")
+    if args.dump is None and args.rc:
         with open(args.rc, errors="replace") as fh:
             args.dump = waverc.dump_of(fh.read(), os.path.dirname(os.path.abspath(args.rc)))
         if args.dump is None:
             raise wq.QueryError("%s has no 'dump' line; give the dump too: serve DUMP --rc %s" % (args.rc, args.rc))
-    hub = Hub(args.dump, gtkw=args.gtkw, rc=args.rc, rtl=args.rtl or (["."] if not args.no_rtl else None))
+    if args.window or not args.dump:
+        remote.Remote.batch = True  # ssh must not wait for a prompt nobody sees
+    hub = None
+    if args.dump:
+        hub = Hub(args.dump, gtkw=args.gtkw, rc=args.rc, rtl=args.rtl or (["."] if not args.no_rtl else None))
     token = args.token or secrets.token_urlsafe(16)
     Handler.hub = hub
     Handler.token = token
@@ -1293,11 +1373,20 @@ def cmd_serve(args):
     port = httpd.server_address[1]
     url = "http://localhost:%d/" % port
     reg = os.path.join(registry_dir(), "%d.json" % port)
-    with open(os.open(reg, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as fh:
-        json.dump({"url": url, "token": token, "dump": hub.dump_path, "pid": os.getpid(),
-                   "started": time.time(), "host": args.host, "port": port}, fh)
+    started = time.time()
+
+    def register():
+        current = Handler.hub
+        with open(os.open(reg, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as fh:
+            json.dump({"url": url, "token": token, "dump": current.dump_path if current else "", "pid": os.getpid(),
+                       "started": started, "host": args.host, "port": port}, fh)
+
+    register()
+    Handler.on_open = register
 
     def cleanup(*_):
+        if Handler.hub is not None:
+            Handler.hub._save()
         try:
             os.remove(reg)
         except OSError:
@@ -1306,22 +1395,45 @@ def cmd_serve(args):
 
     signal_mod.signal(signal_mod.SIGTERM, cleanup)
     signal_mod.signal(signal_mod.SIGINT, cleanup)
-    threading.Thread(target=hub.watch, daemon=True).start()
+    if hub is not None:
+        threading.Thread(target=hub.watch, daemon=True).start()
     hostname = platform.node() or "this-host"
-    print("waveview: serving %s" % hub.dump_path)
+    print("waveview: %s" % ("serving " + hub.dump_path if hub else "no dump yet, choose one in the window"))
     print("  open      %s?token=%s" % (url, token))
-    if remote.is_remote(hub.dump_path):
+    if hub is not None and remote.is_remote(hub.dump_path):
         print("  data      read over ssh from %s, only what the view asks for" % remote.parse(hub.dump_path)[0].host)
     else:
         print("  remote    ssh -L %d:localhost:%d %s   (VS Code Remote forwards it by itself)" % (port, port, hostname))
     print("  control   waveview.py add '<pattern>' | goto --cycle N | look | note TEXT")
     sys.stdout.flush()
-    if args.open:
+    link = url + "?token=" + token
+    if args.window:
+        threading.Thread(target=run_window, args=(link, port, cleanup), daemon=True).start()
+    elif args.open:
         import webbrowser
 
-        webbrowser.open(url + "?token=" + token)
+        webbrowser.open(link)
     httpd.serve_forever()
     return 0
+
+
+def run_window(link, port, on_close):
+    """The viewer in its own window; closing the window ends the server. If
+    there is no such browser, use the default one and keep the console."""
+    import webbrowser
+
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
+    proc = opener.open_window(link, os.path.join(base, "waveview", "window", str(port)))
+    if proc is None:
+        webbrowser.open(link)
+        return
+    opened = time.time()
+    opener.hide_console_if_ours()
+    proc.wait()
+    if time.time() - opened < 3:  # handed over to another process: not ours to follow
+        opener.show_console()
+        return
+    on_close()
 
 
 # ---------------------------------------------------------------------------
@@ -1557,7 +1669,7 @@ def run_client(args):
         if not ss:
             print("no waveview running")
         for s in ss:
-            print("%s  pid %d  %s" % (s["url"], s["pid"], s["dump"]))
+            print("%s  pid %d  %s" % (s["url"], s["pid"], s["dump"] or "(no dump open)"))
         return 0
     c = Client(args.dump, args.url)
     j = getattr(args, "json", False)
@@ -1766,6 +1878,26 @@ def run_selftest():
     check("source: input traced to parent", any(t["kind"] == "parent_conn" and t["signal"] == "din" for t in tr))
     hub2.op_source({"signal": "u_leaf.r_q"})
     check("source: op_source opens the driver", hub2.state["source"]["line"] == 9)
+    # a filelist without the testbench: the DUT's scope is named after no module
+    vcd_tb = os.path.join(tmp, "tb.vcd")
+    with open(vcd_tb, "w") as fh:
+        fh.write("$timescale 1ns $end\n$scope module TOP $end\n$scope module tb_x $end\n$var wire 1 ! tb_only $end\n"
+                 "$scope module u_dut $end\n$var wire 1 \" clk $end\n$var wire 8 # din [7:0] $end\n"
+                 "$var wire 8 $ w_mid [7:0] $end\n$var wire 8 ( dout [7:0] $end\n"
+                 "$scope module u_leaf $end\n$var wire 8 % r_q [7:0] $end\n$var wire 8 & i_d [7:0] $end\n"
+                 "$upscope $end\n$upscope $end\n$upscope $end\n$upscope $end\n$enddefinitions $end\n"
+                 "#0\n0!\n0\"\nb0 #\nb0 $\nb0 (\nb0 %\nb0 &\n#5\n1\"\n")
+    hub_tb = Hub(vcd_tb, rtl=None)
+    hub_tb.rtl_specs = [src_dir]
+    hub_tb.build_index()
+    placed = hub_tb.src_signal("TOP.tb_x.u_dut.w_mid")
+    check("source: DUT placed without its testbench", placed["module"] == "top" and placed["scope"] == "TOP.tb_x.u_dut")
+    check("source: instance below the placed DUT", hub_tb.src_signal("TOP.tb_x.u_dut.u_leaf.r_q")["module"] == "leaf")
+    try:
+        hub_tb.src_signal("TOP.tb_x.tb_only")
+        check("source: testbench signal is a clear error", False)
+    except wq.QueryError as exc:
+        check("source: testbench signal is a clear error", "outside the RTL" in str(exc))
     # Verdi interop: an nWave .rc in, an .rc out, and FSDB through fsdb2vcd
     rc = os.path.join(tmp, "v.rc")
     with open(rc, "w") as fh:
@@ -1807,10 +1939,16 @@ def run_selftest():
           and len(hub4.state["arrows"]) == 1)
     hub4.apply("unmark", {"kind": "cursors", "name": "A"})
     check("wvrc: unmark", [c["name"] for c in hub4.state["cursors"]] == ["B"])
-    fake = os.path.join(tmp, "fsdb2vcd")
-    with open(fake, "w") as fh:
-        fh.write('#!/bin/sh\n# stand-in for Verdi\'s fsdb2vcd: <in> -o <out>\ncp "%s" "$3"\n' % path)
-    os.chmod(fake, 0o755)
+    # stand-in for Verdi's fsdb2vcd: <in> -o <out>
+    if os.name == "nt":
+        fake = os.path.join(tmp, "fsdb2vcd.cmd")
+        with open(fake, "w") as fh:
+            fh.write('@copy /y "%s" "%%~3" >nul\n' % path)
+    else:
+        fake = os.path.join(tmp, "fsdb2vcd")
+        with open(fake, "w") as fh:
+            fh.write('#!/bin/sh\ncp "%s" "$3"\n' % path)
+        os.chmod(fake, 0o755)
     fsdb = os.path.join(tmp, "t.fsdb")
     with open(fsdb, "w") as fh:
         fh.write("stand-in")
@@ -1860,11 +1998,48 @@ def run_selftest():
             got = r.read_files([os.path.join(src_dir, "t.sv")])
             check("remote: RTL indexed on the server and read over ssh",
                   "leaf" in doc["modules"] and "module leaf" in got[os.path.join(src_dir, "t.sv")])
+            seen = opener.list_remote("buildhost", tmp)
+            check("remote: directory listing", seen["path"] == os.path.realpath(tmp)
+                  and any(e["name"] == "r.fst" and e["size"] == os.path.getsize(fst) for e in seen["entries"])
+                  and any(e["name"] == "rtl" and e["dir"] for e in seen["entries"])
+                  and not any(e["name"] == "t.vcd" for e in seen["entries"]))
         finally:
             if old is None:
                 os.environ.pop("WAVEVIEW_SSH", None)
             else:
                 os.environ["WAVEVIEW_SSH"] = old
+    # the Open dialog: start with no dump, list, open, and refuse a bad host
+    Handler.hub = None
+    check("no dump: session is empty", c.call("/api/session")["dump"] is None)
+    try:
+        c.call("/api/meta")
+        check("no dump: wave calls refused", False)
+    except wq.QueryError:
+        check("no dump: wave calls refused", True)
+    listed = c.call("/api/ls", {"path": tmp})
+    check("open: local listing", any(e["name"] == "t.vcd" and not e["dir"] for e in listed["entries"])
+          and any(e["name"] == "rtl" and e["dir"] for e in listed["entries"]))
+    try:
+        c.call("/api/ls", {"host": "-oProxyCommand=x", "path": "/"})
+        check("open: option-like host refused", False)
+    except wq.QueryError:
+        check("open: option-like host refused", True)
+    cfg = os.path.join(tmp, "ssh_config")
+    with open(cfg, "w") as fh:
+        fh.write("Host build01 build02\n  User me\nHost *.lab !x\nhost = gw # jump\nMatch all\n")
+    check("open: hosts from ssh config", opener.ssh_hosts(cfg) == ["build01", "build02", "gw"])
+    check("open: batch ssh", "BatchMode=yes" in type("R", (remote.Remote,), {"batch": True})("h").argv("true"))
+    try:
+        c.call("/api/open", {"path": os.path.join(tmp, "missing.vcd")})
+        check("open: a bad file is an error", False)
+    except wq.QueryError:
+        check("open: a bad file is an error", Handler.hub is None)
+    c.call("/api/open", {"path": path})
+    check("open: dump loaded", c.call("/api/session")["dump"] == path and c.call("/api/meta")["signals"] > 0)
+    first = Handler.hub
+    c.call("/api/open", {"path": vcd2})
+    check("open: switching retires the old dump", first.retired and c.call("/api/session")["dump"] == vcd2)
+    Handler.hub.retire()
     httpd.shutdown()
     hub._save()
     check("state saved next to the dump", os.path.isfile(path + ".waveview.json"))
@@ -1878,7 +2053,8 @@ def build_parser():
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("serve", help="start the viewer on a dump")
-    s.add_argument("dump", nargs="?", help="the dump (default: the 'dump' line of --rc)")
+    s.add_argument("dump", nargs="?",
+                   help="the dump (default: the 'dump' line of --rc, else choose one in the Open dialog)")
     s.add_argument("--port", type=int, default=0, help="port (default: first free from %d)" % DEFAULT_PORT)
     s.add_argument("--host", default="127.0.0.1", help="bind address (default 127.0.0.1)")
     s.add_argument("--token", help="fixed access token (default: random)")
@@ -1892,6 +2068,8 @@ def build_parser():
     s.add_argument("--rtl-root", help="for --rtl on another machine: the directory there that source paths are "
                                        "shown relative to (default: the first entry's directory)")
     s.add_argument("--open", action="store_true", help="open a local browser")
+    s.add_argument("--window", action="store_true",
+                   help="open an application window (Edge or Chrome); closing it stops the server")
 
     client = argparse.ArgumentParser(add_help=False)
     client.add_argument("--dump", help="which running viewer (default: the most recent)")
@@ -1965,7 +2143,35 @@ def build_parser():
     return p
 
 
+def desktop_argv(argv):
+    """The packaged exe started from Explorer: no arguments (double click) or
+    one dump (dropped on the exe, or "Open with"). Anything else is the normal
+    command line. The source view stays off until asked for in the Open
+    dialog: the working directory of a double click is not a project."""
+    if len(argv) > 1 or (argv and not argv[0].lower().endswith((".fst", ".vcd", ".fsdb"))):
+        return argv
+    return ["serve", "--no-rtl", "--window"] + argv
+
+
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if not getattr(sys, "frozen", False):
+        return run_command(argv)
+    launched = desktop_argv(argv)
+    if launched is argv:
+        return run_command(argv)
+    # started from Explorer: keep the console open so an error can be read
+    try:
+        rc = run_command(launched)
+    except Exception as exc:
+        print("error: %s" % exc, file=sys.stderr)
+        rc = 1
+    if rc:
+        input("Press Enter to close...")
+    return rc
+
+
+def run_command(argv):
     args = build_parser().parse_args(argv)
     try:
         if args.cmd == "serve":

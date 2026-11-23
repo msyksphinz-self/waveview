@@ -56,6 +56,23 @@ From Windows, with the dump on a Linux build server:
 waveview.cmd serve build01:/work/sim/w.fst --rtl build01:/work/proj/rtl/filelist.f --rtl-root /work/proj --open
 ```
 
+### Standalone Windows executable
+
+`waveview.exe` needs no Python, Verilator or C compiler. Double-click it and a
+window opens (Edge or Chrome in app mode). In **Open…**, choose This PC or a host
+from `~/.ssh/config`, press Connect, browse to a dump and open it. Closing the
+window ends the program. You can also drop a `.fst` / `.vcd` / `.fsdb` on the exe.
+FSDB still needs Verdi's `fsdb2vcd`. With arguments it is the normal command
+line: `waveview.exe serve w.fst --open`.
+
+The window has no terminal for prompts, so ssh must log in without one: use a
+key (with ssh-agent if it has a passphrase) and connect once from a terminal to
+accept the host key. The server needs a C compiler and Verilator the first time,
+to build its FST reader.
+
+To build it, run `./build_windows.sh` from WSL with a Windows Python on `PATH`
+and Verilator installed. The result is `dist/waveview.exe`.
+
 ## Files
 
 | File | What |
@@ -65,8 +82,10 @@ waveview.cmd serve build01:/work/sim/w.fst --rtl build01:/work/proj/rtl/filelist
 | `wavequery.py` | text queries over a dump |
 | `wavesource.py`, `fstsrv.c` | lazy FST reading (local or over ssh) |
 | `remote.py` | ssh transport, remote build of `fstsrv`, remote RTL index |
+| `opener.py` | Open dialog backend: ssh hosts, directory listings, app window |
 | `rtlindex.py` | SystemVerilog index (heuristic, Verilator `--xml-only`, or design JSON) |
 | `wave2img.py`, `fst2vcd_mini.c` | VCD parser; draws a timing diagram to SVG/PNG (needs matplotlib) |
+| `build_windows.sh` | builds the standalone `dist/waveview.exe` |
 | `docs/guide_ja.md` | user guide (Japanese) |
 | `docs/waveview_design_format.md` | design JSON format, for exporters (e.g. from a Verdi KDB) |
 | `.claude/skills/wave-debug/` | Claude Code skill: how an agent debugs with these tools |

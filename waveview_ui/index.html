@@ -9,6 +9,7 @@
 <body>
 <div id="toolbar">
   <span id="title">waveview</span>
+  <button id="b-open" title="Open a waveform, here or on a server over ssh (o with Ctrl)">Open…</button>
   <span class="sep"></span>
   <button id="b-fit" title="Zoom fit (f)">Fit</button>
   <button id="b-zin" title="Zoom in (Z, Ctrl+wheel)">Zoom +</button>
@@ -81,6 +82,29 @@
     <textarea id="ask-text" rows="5" placeholder="Why does the flush fire at the cursor?"></textarea>
     <div class="dlgbtns"><button value="cancel">Cancel</button><button id="ask-send" value="send" class="primary">Send</button></div>
   </form>
+</dialog>
+
+<dialog id="opendlg">
+  <h3>Open a waveform</h3>
+  <div class="op-row">
+    <label for="op-host">Location</label>
+    <select id="op-host"></select>
+    <input id="op-manual" spellcheck="false" placeholder="user@host or host:port" hidden>
+    <button id="op-connect">Connect</button>
+  </div>
+  <div class="op-row">
+    <label for="op-path">Folder</label>
+    <button id="op-up" title="Parent folder">↑</button>
+    <input id="op-path" spellcheck="false" placeholder="/work/sim">
+    <button id="op-go">Go</button>
+  </div>
+  <div id="op-list" tabindex="0"></div>
+  <div class="op-row">
+    <label for="op-rtl">RTL</label>
+    <input id="op-rtl" spellcheck="false" placeholder="optional: filelist (.f) or folder, for the source view">
+  </div>
+  <div id="op-msg" class="dim"></div>
+  <div class="dlgbtns"><button id="op-cancel">Cancel</button><button id="op-open" class="primary" disabled>Open</button></div>
 </dialog>
 
 <dialog id="helpdlg">
