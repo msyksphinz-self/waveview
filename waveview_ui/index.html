@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>waveview</title>
+<link rel="stylesheet" href="/ui/style.css">
+</head>
+<body>
+<div id="toolbar">
+  <span id="title">waveview</span>
+  <span class="sep"></span>
+  <button id="b-fit" title="Zoom fit (f)">Fit</button>
+  <button id="b-zin" title="Zoom in (Z, Ctrl+wheel)">Zoom +</button>
+  <button id="b-zout" title="Zoom out (z, Ctrl+wheel)">Zoom −</button>
+  <button id="b-prev" title="Previous edge of the selected signal (←)">◀ Edge</button>
+  <button id="b-next" title="Next edge of the selected signal (→)">Edge ▶</button>
+  <span class="sep"></span>
+  <span class="lbl cur">Cursor</span><span id="cur" class="val">-</span>
+  <span class="lbl mrk">Marker</span><span id="mrk" class="val">-</span>
+  <span class="lbl">Δ</span><span id="dlt" class="val">-</span>
+  <span class="sep"></span>
+  <input id="find" spellcheck="false" placeholder="Search: commit_valid &amp;&amp; pc == 0x80000040  (Enter next · Shift+Enter prev)">
+  <button id="b-ask" class="primary" title="Send the current view and a message to the AI agent">Send to AI</button>
+  <a id="b-gtkw" class="btn" href="/api/export.gtkw" title="Save the signal list as a GTKWave save file">.gtkw</a>
+  <button id="b-theme" title="Light / dark">◐</button>
+  <button id="b-help" title="Keyboard shortcuts (?)">?</button>
+</div>
+<div id="note" hidden><span id="note-src"></span><span id="note-text"></span><button id="note-x" title="Dismiss">×</button></div>
+<div id="main">
+  <div id="sst">
+    <div class="hdr">Hierarchy</div>
+    <div id="tree"></div>
+    <div class="hdr row"><span>Signals</span><input id="filter" spellcheck="false" placeholder="filter, e.g. *valid*"></div>
+    <div id="siglist"></div>
+    <div id="sst-btns"><button id="b-append" title="Append the chosen signals (double-click also works)">Append</button><button id="b-insert" title="Insert after the selected wave row">Insert</button><button id="b-replace" title="Replace the selected wave rows">Replace</button></div>
+  </div>
+  <div id="split" title="Drag to resize"></div>
+  <div id="lists">
+    <div id="names-col"><div class="colhdr">Signals</div><div id="names"></div><div class="tail"></div></div>
+    <div id="values-col"><div class="colhdr">Value</div><div id="values"></div><div class="tail"></div></div>
+  </div>
+  <div id="wavebox"><canvas id="wave"></canvas></div>
+</div>
+<div id="status">
+  <span id="st-conn" class="pill">connecting…</span>
+  <span id="st-agent" class="pill"></span>
+  <span id="st-last"></span>
+  <span class="grow"></span>
+  <span id="st-dump"></span>
+</div>
+<div id="menu" hidden></div>
+<div id="toast" hidden></div>
+
+<dialog id="askdlg">
+  <form method="dialog">
+    <h3>Send to AI</h3>
+    <p class="dim">The agent receives this message together with the current view: signals, cursor, marker, zoom and values.
+      An agent picks it up with <code>tools/waveview.py inbox --wait 600</code>.</p>
+    <textarea id="ask-text" rows="5" placeholder="Why does the flush fire at the cursor?"></textarea>
+    <div class="dlgbtns"><button value="cancel">Cancel</button><button id="ask-send" value="send" class="primary">Send</button></div>
+  </form>
+</dialog>
+
+<dialog id="helpdlg">
+  <form method="dialog">
+    <h3>Mouse and keys</h3>
+    <table class="keys">
+      <tr><th>Click</th><td>Cursor (and select the row)</td><th>Shift+Click / Middle</th><td>Marker</td></tr>
+      <tr><th>Drag</th><td>Zoom to the dragged range</td><th>Ctrl+Wheel</th><td>Zoom at the mouse</td></tr>
+      <tr><th>Wheel</th><td>Scroll rows</td><th>Shift+Wheel</th><td>Pan in time</td></tr>
+      <tr><th>f</th><td>Zoom fit</td><th>z / Z</th><td>Zoom out / in</td></tr>
+      <tr><th>← / →</th><td>Previous / next edge of selected</td><th>n / N</th><td>Next / previous search hit</td></tr>
+      <tr><th>c</th><td>Center on cursor</td><th>m</th><td>Marker at cursor</td></tr>
+      <tr><th>↑ / ↓</th><td>Select row</td><th>Alt+↑ / ↓</th><td>Move row</td></tr>
+      <tr><th>Delete</th><td>Remove selected rows</td><th>Ctrl+A</th><td>Select all rows</td></tr>
+      <tr><th>h d s b o</th><td>Radix hex/dec/signed/bin/oct</td><th>/ or Ctrl+F</th><td>Search</td></tr>
+      <tr><th>a</th><td>Send to AI</td><th>Esc</th><td>Clear selection, close menus</td></tr>
+    </table>
+    <p class="dim">Signals: double-click in the signal list or drag them onto the wave rows. Drag rows to reorder. Right-click a row for radix and more.</p>
+    <div class="dlgbtns"><button value="ok" class="primary">Close</button></div>
+  </form>
+</dialog>
+<script src="/ui/app.js"></script>
+</body>
+</html>

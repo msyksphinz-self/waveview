@@ -1,6 +1,6 @@
 ---
 name: wave-debug
-description: Debug RTL behaviour from a simulation waveform (VCD/FST) without a GUI, using tools/wavequery.py. Use when a test fails or hangs and you need to see what signals did cycle by cycle, find when a condition first happened, or check a handshake / pipeline flow in a dump.
+description: Debug RTL behaviour from a simulation waveform (VCD/FST) with tools/wavequery.py (text queries) and tools/waveview.py (the browser waveform viewer shared with the user). Use when a test fails or hangs and you need to see what signals did cycle by cycle, find when a condition first happened, check a handshake / pipeline flow in a dump, or show the user a moment in the waveform.
 ---
 
 # Waveform debugging with tools/wavequery.py
@@ -62,3 +62,30 @@ never compare equal to anything; use `isx(s)` to find them.
   small queries are cheap
 - For a picture to put in a doc or show the user, the same window can be
   drawn with `tools/wave2img.py` (needs matplotlib)
+
+## Working in the viewer with the user (tools/waveview.py)
+
+When the user has a viewer open (`tools/waveview.py status` lists it), you
+share one view with them: what you set appears in their browser at once.
+
+```sh
+tools/waveview.py look                        # what the user is looking at now
+tools/waveview.py look --table                # plus the visible cycles as a table
+tools/waveview.py add '*u_rob.commit_*' '*u_bru.mispredict'
+tools/waveview.py goto --cycle 1234 --span 40 # cursor there, 40 cycles wide
+tools/waveview.py marker --cycle 1228         # cursor-marker delta shows in the UI
+tools/waveview.py annotate --cycle 1230 "redirect"
+tools/waveview.py note "flush at 1234 comes from the mispredict at 1230"
+tools/waveview.py find 'rose(flush_valid)'    # moves the cursor to the next hit
+tools/waveview.py inbox --wait 600            # wait for the user's "Send to AI"
+```
+
+- Start one yourself with `tools/waveview.py serve <dump>` (run it in the
+  background) and give the user the printed URL; on a remote machine they
+  forward the port (`ssh -L 8765:localhost:8765 <host>`, or VS Code does it)
+- Use wavequery for the digging, and waveview to show the user the result:
+  put the evidence on screen (signals, cursor, marker, labels) and say the
+  conclusion in a note
+- `inbox` messages carry the user's view at the time they pressed the button,
+  so you know which signals and which cycle they mean
+- Do not `clear` the user's signal list without being asked; add to it

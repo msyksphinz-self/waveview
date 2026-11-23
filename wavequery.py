@@ -617,10 +617,15 @@ def text_table(header, rows):
     if not rows:
         return ["  ".join(header)]
     widths = [max(len(str(h)), *(len(str(r[i])) for r in rows)) for i, h in enumerate(header)]
-    lines = ["  ".join(str(h).rjust(w) for h, w in zip(header, widths)).rstrip()]
-    for r in rows:
-        lines.append("  ".join(str(c).rjust(w) for c, w in zip(r, widths)).rstrip())
-    return lines
+    # names read better left aligned, numbers right aligned
+    left = [h in ("name", "signal") for h in header]
+
+    def line(cells):
+        return "  ".join(
+            str(c).ljust(w) if lft else str(c).rjust(w) for c, w, lft in zip(cells, widths, left)
+        ).rstrip()
+
+    return [line(header)] + [line(r) for r in rows]
 
 
 def truncated_line(left, what="rows"):
