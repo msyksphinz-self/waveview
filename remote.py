@@ -42,6 +42,9 @@ class RemoteError(Exception):
 
 
 class Remote:
+    # no terminal to answer a prompt on (the viewer's own window): fail instead
+    batch = False
+
     def __init__(self, host, port=None):
         self.host, self.port = host, port
 
@@ -51,12 +54,16 @@ class Remote:
     def argv(self, command, compress=False):
         base = shlex.split(os.environ.get("WAVEVIEW_SSH", "ssh"), posix=os.name != "nt")
         opts = ["-T", "-o", "ServerAliveInterval=30"]
+        if self.batch:
+            opts += ["-o", "BatchMode=yes", "-o", "ConnectTimeout=15"]
         if compress:
             opts.append("-C")
         if self.port:
             opts += ["-p", str(self.port)]
         if os.path.basename(base[0]).lower().startswith("plink"):
             opts = ["-C"] if compress else []
+            if self.batch:
+                opts.append("-batch")
             if self.port:
                 opts += ["-P", str(self.port)]
         return base + opts + [self.host, command]

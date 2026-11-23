@@ -67,6 +67,7 @@ function connect() {
     loadSignals().then(() => { requestData(); fetchValues(); });
     toast('Dump reloaded from disk');
   });
+  es.addEventListener('reopen', () => location.reload());
   es.onopen = () => setPill('st-conn', 'connected', 'ok');
   es.onerror = () => setPill('st-conn', 'disconnected, retrying…', 'bad');
 }
@@ -108,8 +109,9 @@ async function loadSignals() {
   for (const r of S.rows) r.w = S.width.get(r.name) || 1;
   buildTree();
   $('st-dump').textContent = `${S.meta.dump}  ·  ${S.meta.signals} signals  ·  ${S.meta.timescale}`;
-  document.title = 'waveview · ' + S.meta.dump.split('/').pop();
-  $('title').textContent = S.meta.dump.split('/').pop();
+  const base = S.meta.dump.split(/[\\/]/).pop();
+  document.title = 'waveview · ' + base;
+  $('title').textContent = base;
 }
 
 // ---------------------------------------------------------------------------
@@ -1257,6 +1259,8 @@ function moveSel(dir) {
 }
 
 document.addEventListener('keydown', (e) => {
+  if ($('opendlg').open) return;
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'o') { e.preventDefault(); showOpen(); return; }
   const inField = e.target.matches('input, textarea');
   if (e.key === 'Escape') {
     $('menu').hidden = true;
@@ -1748,9 +1752,128 @@ function followSource(st) {
 
 // ---------------------------------------------------------------------------
 
+// Open dialog: this PC or a host of ~/.ssh/config, then a folder, then a dump
+// ---------------------------------------------------------------------------
+
+const OP = { host: '', path: '', file: null, seq: 0, hosts: false, hasDump: false, busy: false };
+const OTHER_HOST = '\u0000other';
+
+function opRemembered(key) { try { return localStorage.getItem('wv-open-' + key) || ''; } catch (e) { return ''; } }
+function opRemember(key, v) { try { localStorage.setItem('wv-open-' + key, v); } catch (e) { /* ignore */ } }
+function opMsg(text, bad) { $('op-msg').textContent = text; $('op-msg').classList.toggle('bad', !!bad); }
+function opSize(n) {
+  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return (i ? n.toFixed(1) : n) + ' ' + u[i];
+}
+function opChosenHost() {
+  const v = $('op-host').value;
+  return v === OTHER_HOST ? $('op-manual').value.trim() : v;
+}
+function opPick(entry, row) {
+  OP.file = entry;
+  for (const el of $('op-list').children) el.classList.toggle('sel', el === row);
+  $('op-open').disabled = OP.busy;
+}
+
+async function opList(host, path) {
+  const seq = ++OP.seq;
+  OP.file = null;
+  $('op-open').disabled = true;
+  $('op-list').replaceChildren();
+  opMsg(host ? `Connecting to ${host}…` : 'Reading…');
+  try {
+    const d = await api('/api/ls', { host, path });
+    if (seq !== OP.seq) return;
+    OP.host = host; OP.path = d.path; OP.parent = d.parent;
+    $('op-path').value = d.path === '*' ? '' : d.path;
+    $('op-up').disabled = d.parent === null || d.parent === undefined;
+    opRemember('host', host); opRemember('path:' + host, d.path);
+    for (const e of d.entries) {
+      const row = document.createElement('div');
+      row.className = 'op-item' + (e.dir ? ' dir' : '');
+      const name = document.createElement('span');
+      name.textContent = (e.dir ? '▸ ' : '') + e.name;
+      const size = document.createElement('span');
+      size.className = 'dim';
+      size.textContent = e.dir ? '' : opSize(e.size);
+      row.append(name, size);
+      if (e.dir) row.onclick = () => opList(host, e.path);
+      else { row.onclick = () => opPick(e, row); row.ondblclick = () => { opPick(e, row); opOpen(); }; }
+      $('op-list').append(row);
+    }
+    const files = d.entries.filter((e) => !e.dir).length;
+    opMsg(`${host || 'This PC'}: ${files} waveform file${files === 1 ? '' : 's'} here` + (d.more ? ' (list cut short)' : ''));
+  } catch (err) {
+    if (seq !== OP.seq) return;
+    opMsg(err.message + (host ? '  (ssh must log in without a prompt: a key with ssh-agent, and a known host key)' : ''), true);
+  }
+}
+
+async function opOpen() {
+  if (!OP.file || OP.busy) return;
+  OP.busy = true;
+  OP.seq++;  // a listing still on its way must not replace this message
+  $('op-open').disabled = true;
+  opMsg(`Opening ${OP.file.name}…` + (OP.host ? ' The first time on a server also builds its reader.' : ''));
+  try {
+    await api('/api/open', { host: OP.host, path: OP.file.path, rtl: $('op-rtl').value });
+    opRemember('rtl:' + OP.host, $('op-rtl').value);
+    location.reload();
+  } catch (err) {
+    OP.busy = false;
+    $('op-open').disabled = false;
+    opMsg(err.message, true);
+  }
+}
+
+function opHostChanged() {
+  const other = $('op-host').value === OTHER_HOST;
+  $('op-manual').hidden = !other;
+  const host = opChosenHost();
+  $('op-rtl').value = opRemembered('rtl:' + host);
+  // a folder belongs to one machine: never carry it over to another
+  if (other && !host) { $('op-path').value = ''; $('op-list').replaceChildren(); OP.file = null; $('op-open').disabled = true; opMsg('Enter a host, then Connect'); $('op-manual').focus(); return; }
+  if (host) { $('op-list').replaceChildren(); $('op-path').value = opRemembered('path:' + host); OP.file = null; $('op-open').disabled = true; opMsg('Press Connect'); return; }
+  opList('', opRemembered('path:'));
+}
+
+async function showOpen() {
+  $('op-cancel').hidden = !OP.hasDump;
+  $('opendlg').showModal();
+  if (OP.hosts) return;
+  OP.hosts = true;
+  let hosts = [];
+  try { hosts = (await api('/api/hosts')).hosts; } catch (e) { /* no ssh config */ }
+  const sel = $('op-host');
+  sel.replaceChildren(new Option('This PC', ''), ...hosts.map((h) => new Option(h, h)), new Option('Other host…', OTHER_HOST));
+  const last = opRemembered('host');
+  if (hosts.includes(last)) sel.value = last;
+  opHostChanged();
+}
+
+$('b-open').onclick = showOpen;
+$('op-host').onchange = opHostChanged;
+$('op-connect').onclick = () => { const h = opChosenHost(); if (h || $('op-host').value === '') opList(h, h ? $('op-path').value.trim() : OP.path); };
+$('op-go').onclick = () => opList(opChosenHost(), $('op-path').value.trim());
+$('op-up').onclick = () => { if (OP.parent !== null && OP.parent !== undefined) opList(OP.host, OP.parent); };
+$('op-open').onclick = opOpen;
+$('op-cancel').onclick = () => $('opendlg').close();
+$('op-path').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('op-go').click(); });
+$('op-manual').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('op-connect').click(); });
+$('op-manual').addEventListener('input', () => { OP.seq++; $('op-path').value = opRemembered('path:' + opChosenHost()); $('op-list').replaceChildren(); OP.file = null; $('op-open').disabled = true; opMsg('Press Connect'); });
+// with nothing loaded there is nothing behind the dialog to go back to
+$('opendlg').addEventListener('cancel', (e) => { if (!OP.hasDump) e.preventDefault(); });
+
+// ---------------------------------------------------------------------------
+
 (async function init() {
   try { const t = localStorage.getItem('wv-theme'); if (t) document.documentElement.dataset.theme = t; } catch (e) { /* ignore */ }
   readColors();
+  const session = await api('/api/session');
+  OP.hasDump = !!session.dump;
+  if (!session.dump) { setPill('st-conn', 'no waveform open', ''); showOpen(); return; }
   await loadSignals();
   connect();
 })();

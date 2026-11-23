@@ -153,3 +153,17 @@ table.keys td { padding: 3px 14px 3px 0; }
 #code .ann { font-size: 10px; line-height: 14px; margin-left: 2px; padding: 0 3px; border-radius: 3px; background: rgba(63, 215, 230, .14); color: var(--ann); vertical-align: 1px; }
 #code .ann.x { color: var(--wx); background: rgba(255, 82, 82, .14); }
 #code .ann.chg { background: rgba(255, 238, 85, .22); color: var(--cursor); }
+
+#opendlg { width: min(720px, calc(100vw - 32px)); max-width: none; box-sizing: border-box; }
+.op-row { display: flex; align-items: center; gap: 6px; margin: 6px 0; }
+.op-row label { width: 58px; flex: none; color: var(--dim); }
+.op-row input { flex: 1; min-width: 0; }
+.op-row select { flex: 1; min-width: 0; background: var(--wbg); color: var(--fg); border: 1px solid var(--line); border-radius: 4px; padding: 3px 5px; }
+#op-list { height: min(380px, 45vh); overflow-y: auto; background: var(--wbg); border: 1px solid var(--line); border-radius: 4px; margin: 6px 0; outline: none; }
+.op-item { display: flex; justify-content: space-between; gap: 12px; padding: 3px 8px; cursor: default; white-space: nowrap; }
+.op-item span:first-child { overflow: hidden; text-overflow: ellipsis; }
+.op-item:hover { background: var(--hover); }
+.op-item.sel { background: var(--sel); }
+.op-item.dir { color: var(--accent); }
+#op-msg { min-height: 1.3em; font-size: 12px; overflow-wrap: anywhere; max-height: 5em; overflow-y: auto; }
+#op-msg.bad { color: #e5534b; }
