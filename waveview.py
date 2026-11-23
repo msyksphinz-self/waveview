@@ -38,6 +38,8 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import collections
+import gzip
 import http.server
 import json
 import os
@@ -59,6 +61,12 @@ import wavequery as wq  # noqa: E402
 
 UI_DIR = os.path.join(HERE, "waveview_ui")
 DEFAULT_PORT = 8765
+
+# Tiles: a tile of level L covers TILE_BUCKETS buckets of 2**L time units.
+# The browser asks for the tiles that cover the visible rows and time range,
+# at the level where one bucket is about one pixel, and caches them.
+TILE_BUCKETS = 1024
+TILE_CACHE = 40000
 
 
 def registry_dir():
@@ -99,6 +107,8 @@ class Hub:
             "annotations": [],  # [{time, label, source}]
             "last": None,  # {op, source, client, at}
         }
+        self.tiles = collections.OrderedDict()
+        self.clockinfo = None
         self._restore()
         if gtkw:
             self._load_gtkw(gtkw)
@@ -211,7 +221,157 @@ class Hub:
             "clocks": [s.name for n, s in w.clock_candidates() if n > 0][:8],
             "cycles": len(tl.edges),
             "gen": self.gen,
+            "clockinfo": self.clock_info(),
+            "tile_buckets": TILE_BUCKETS,
         }
+
+    def clock_info(self):
+        """First edge and period of the clock, and whether every period is
+        the same. A regular clock lets the browser number cycles by itself,
+        with no edge list on the wire."""
+        clk = self.state["clock"]
+        key = (self.gen, clk)
+        if self.clockinfo and self.clockinfo[0] == key:
+            return self.clockinfo[1]
+        info = None
+        if clk:
+            edges = self.wave.edges(self.wave.by_name[clk])
+            if len(edges) > 1:
+                period = edges[1] - edges[0]
+                regular = all(edges[i + 1] - edges[i] == period for i in range(len(edges) - 1))
+                info = {"first": edges[0], "period": period, "count": len(edges), "regular": regular}
+            elif edges:
+                info = {"first": edges[0], "period": 0, "count": 1, "regular": False}
+        self.clockinfo = (key, info)
+        return info
+
+    def edges_in(self, t0, t1, limit=4000):
+        tl = self.timeline()
+        if not tl.edges:
+            return {"edges": None, "edge0": None}
+        lo = bisect.bisect_left(tl.edges, t0)
+        hi = bisect.bisect_right(tl.edges, t1)
+        if hi - lo > limit:
+            return {"edges": None, "edge0": lo, "count": hi - lo}
+        return {"edges": tl.edges[lo:hi], "edge0": lo}
+
+    # -- tiles --------------------------------------------------------------
+
+    @staticmethod
+    def enc(v, width):
+        """Compact value text: hex for known values, x / z when uniform,
+        ~bits when mixed."""
+        if width == 1:
+            return v
+        if "x" in v or "z" in v:
+            if v.count(v[0]) == len(v):
+                return v[0]
+            return "~" + v
+        return "%x" % int(v, 2)
+
+    def tile(self, sig, level, k):
+        key = (self.gen, sig.code, sig.width, level, k)
+        hit = self.tiles.get(key)
+        if hit is not None:
+            self.tiles.move_to_end(key)
+            return hit
+        t = self._make_tile(sig, level, k)
+        self.tiles[key] = t
+        if len(self.tiles) > TILE_CACHE:
+            self.tiles.popitem(last=False)
+        return t
+
+    def _make_tile(self, sig, level, k):
+        """One tile: the value before it, then at most one change per
+        bucket. A bucket holding several changes becomes one change to its
+        final value plus a dense entry [start, end, records, high share].
+        A tile with no dense entry is exact: no finer level has more to show.
+        Buckets are found by bisection, so a coarse tile costs about one
+        step per non empty bucket, not one per change."""
+        w = self.wave
+        width = sig.width
+        times = w.times.get(sig.code, [])
+        values = w.values.get(sig.code, [])
+        norm = w2i.normalize
+        ts = k * (TILE_BUCKETS << level)
+        te = ts + (TILE_BUCKETS << level)
+        i = bisect.bisect_left(times, ts)
+        end = bisect.bisect_left(times, te, i)
+        prev = norm(values[i - 1], width) if i > 0 else "x" * width
+        v0 = prev
+        out_t, out_v, dense = [], [], []
+        last_db, last_q = None, None  # bucket and shade of the last dense entry
+        while i < end:
+            b = (times[i] - ts) >> level
+            be = ts + ((b + 1) << level)
+            j = bisect.bisect_left(times, be, i, end)
+            n = j - i
+            if n <= 64:
+                trans = []
+                for m in range(i, j):
+                    v = norm(values[m], width)
+                    if v != prev:
+                        trans.append((times[m], v))
+                        prev = v
+                if not trans:
+                    i = j
+                    continue
+                first, last_t, last_v, cnt = trans[0][0], trans[-1][0], trans[-1][1], len(trans)
+                hi = sum(1 for _, v in trans if v == "1") / cnt if width == 1 else 0
+                is_dense = cnt > 1
+            else:
+                seg = values[i:j]
+                last_v = norm(values[j - 1], width)
+                if len(set(seg)) == 1 and last_v == prev:
+                    i = j
+                    continue
+                first = next((times[m] for m in range(i, j) if norm(values[m], width) != prev), times[i])
+                last_t, cnt = times[j - 1], n
+                hi = seg.count("1") / n if width == 1 else 0
+                is_dense = True
+                prev = last_v
+            if not is_dense:
+                out_t.append(first)
+                out_v.append(last_v)
+                last_db = None
+            else:
+                # neighbouring dense buckets with the same shade become one
+                # entry: zoomed out this is what keeps tiles small
+                q = round(hi * 8) if width == 1 else cnt.bit_length()
+                if last_db == b - 1 and last_q == q:
+                    d = dense[-1]
+                    tot = d[2] + cnt
+                    d[3] = (d[3] * d[2] + hi * cnt) / tot
+                    d[2] = tot
+                    d[1] = last_t
+                    out_v[-1] = last_v
+                else:
+                    out_t.append(first)
+                    out_v.append(last_v)
+                    dense.append([first, last_t, cnt, hi])
+                last_db, last_q = b, q
+            i = j
+        # wire form: times as deltas from the tile start, values compact
+        dt, last_t = [], ts
+        for t in out_t:
+            dt.append(t - last_t)
+            last_t = t
+        return {
+            "v0": self.enc(v0, width),
+            "t": dt,
+            "v": [self.enc(v, width) for v in out_v],
+            "d": [[a - ts, b - ts, n, round(h, 2)] for a, b, n, h in dense],
+            "x": 1 if not dense else 0,
+        }
+
+    def tiles_for(self, level, want):
+        out = {}
+        for name, ks in want.items():
+            sig = self.wave.by_name.get(name)
+            if sig is None:
+                continue
+            out[name] = {str(k): self.tile(sig, int(level), int(k)) for k in ks[:64]}
+        return {"L": level, "gen": self.gen, "tiles": out}
 
     # -- push ---------------------------------------------------------------
 
@@ -605,11 +765,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             body = json.dumps(body, separators=(",", ":"))
         if isinstance(body, str):
             body = body.encode()
+        extra = dict(extra or {})
+        if len(body) > 1024 and "gzip" in self.headers.get("Accept-Encoding", ""):
+            body = gzip.compress(body, compresslevel=5)
+            extra["Content-Encoding"] = "gzip"
         self.send_response(code)
         self.send_header("Content-Type", ctype + ("; charset=utf-8" if ctype.startswith("text") or ctype.endswith("json") else ""))
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
-        for k, v in (extra or {}).items():
+        for k, v in extra.items():
             self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
@@ -665,6 +829,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     with hub.lock:
                         return self._send(200, hub.wave_data(body["signals"], float(body["t0"]), float(body["t1"]),
                                                              body.get("px", 1000)))
+                if path == "/api/tiles":
+                    with hub.lock:
+                        return self._send(200, hub.tiles_for(int(body["L"]), body["want"]))
+                if path == "/api/edges":
+                    with hub.lock:
+                        return self._send(200, hub.edges_in(float(body["t0"]), float(body["t1"])))
                 if path == "/api/values":
                     with hub.lock:
                         return self._send(200, hub.values_at(body["signals"], float(body["t"])))
@@ -1052,6 +1222,23 @@ def run_selftest():
     check("wave data", [t for t, _ in d["signals"]["tb_wave.dut.req"]["ch"]] == [20, 30, 70, 90] and len(d["edges"]) == 20)
     d = c.call("/api/wave", {"signals": ["tb_wave.dut.data"], "t0": 0, "t1": 195, "px": 16})
     check("dense merge", len(d["signals"]["tb_wave.dut.data"]["dense"]) > 0)
+    t = c.call("/api/tiles", {"L": 0, "want": {"tb_wave.dut.req": [0]}})["tiles"]["tb_wave.dut.req"]["0"]
+    abs_t, acc = [], 0
+    for d in t["t"]:
+        acc += d
+        abs_t.append(acc)
+    check("level 0 tile is exact", t["x"] == 1 and abs_t == [0, 20, 30, 70, 90] and t["v"] == ["0", "1", "0", "1", "0"])
+    t = c.call("/api/tiles", {"L": 0, "want": {"tb_wave.dut.data": [0]}})["tiles"]["tb_wave.dut.data"]["0"]
+    check("tile values are compact hex", "beef" in t["v"] and t["v0"] == "x")
+    coarse = c.call("/api/tiles", {"L": 0, "want": {"tb_wave.dut.clk": [0]}})
+    check("clock tile exact at level 0", coarse["tiles"]["tb_wave.dut.clk"]["0"]["x"] == 1)
+    TB = TILE_BUCKETS
+    # a level where one bucket spans two clock periods must summarise
+    lvl = 5  # 32 time units per bucket, the clock toggles every 5
+    t = c.call("/api/tiles", {"L": lvl, "want": {"tb_wave.dut.clk": [0]}})["tiles"]["tb_wave.dut.clk"]["0"]
+    check("coarse tile summarises with dense stretches", t["x"] == 0 and len(t["d"]) > 0
+          and all(0 <= d[3] <= 1 for d in t["d"]) and TB == 1024)
+    check("regular clock info", c.call("/api/meta")["clockinfo"] == {"first": 0, "period": 10, "count": 20, "regular": True})
     c.cmd("note", text="hello")
     snap = c.call("/api/snapshot?table=1")
     check("snapshot", snap["note"]["text"] == "hello" and snap["cursor"]["cycle"] == 2 and snap["table"]["total"] > 0)

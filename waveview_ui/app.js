@@ -60,7 +60,8 @@ function connect() {
   es.addEventListener('state', (ev) => applyState(JSON.parse(ev.data)));
   es.addEventListener('reload', (ev) => {
     S.meta = JSON.parse(ev.data);
-    loadSignals().then(() => { S.data = null; requestData(); fetchValues(); });
+    T.cache.clear(); T.inflight.clear(); S.edges = null;
+    loadSignals().then(() => { requestData(); fetchValues(); });
     toast('Dump reloaded from disk');
   });
   es.onopen = () => setPill('st-conn', 'connected', 'ok');
@@ -82,7 +83,8 @@ function applyState(st) {
     fetchValues();
   }
   firstState = false;
-  if (st.gen !== prevGen) S.data = null;
+  if (st.gen !== prevGen) { T.cache.clear(); S.edges = null; }
+  if (S.meta && st.clock !== S.meta.clock) api('/api/meta').then((m) => { S.meta = m; S.edges = null; draw(); });
   if (st.last && !own && st.last.source !== 'ui') {
     const el = $('st-last');
     el.textContent = `${st.last.source}: ${st.last.op}`;
@@ -106,27 +108,202 @@ async function loadSignals() {
   $('title').textContent = S.meta.dump.split('/').pop();
 }
 
-// wave data for the visible rows, fetched with one screen of margin each side
-let fetchTimer = null;
-function requestData(force) {
-  const names = S.rows.map((r) => r.name);
-  const key = names.join('|') + '#' + (S.state ? S.state.gen : 0);
-  const span = S.view[1] - S.view[0];
-  const d = S.data;
-  const fits = d && d.key === key && S.view[0] >= d.t0 && S.view[1] <= d.t1 &&
-    Math.abs(Math.log((d.t1 - d.t0) / 3 / span)) < 0.6;
-  if (fits && !force) return;
-  clearTimeout(fetchTimer);
-  fetchTimer = setTimeout(async () => {
-    const seq = ++S.seq;
-    try {
-      const r = await api('/api/wave', { signals: names, t0: S.view[0] - span, t1: S.view[1] + span, px: canvasW() * 3 });
-      if (seq !== S.seq) return;
-      r.key = key;
-      S.data = r;
-      draw();
-    } catch (e) { toast(e.message); }
-  }, d ? 40 : 0);
+// ---------------------------------------------------------------------------
+// Tiles: wave data is fetched just in time, only for the rows and the time
+// range on screen. A tile of level L holds TB buckets of 2^L time units; the
+// level is picked so that a bucket is about one pixel. Zoomed out, a tile is
+// a summary (dense stretches with a change count and, for 1-bit signals, the
+// share of 1s); zoomed in, it is the exact list of changes. A tile without
+// dense stretches is exact, and any deeper zoom inside it reuses it with no
+// transfer. While a tile is on its way, the coarser tile above it (already
+// cached, since one usually zooms in from it) stands in.
+// ---------------------------------------------------------------------------
+
+const T = {
+  cache: new Map(),   // key -> decoded tile, in LRU order
+  inflight: new Set(),
+  bytes: 0,           // bytes received for tiles (compressed, as sent)
+  reqs: 0,
+  missing: 0,         // tile slots drawn from a stand-in or not at all
+  LIMIT: 30000,
+};
+const TB = () => (S.meta && S.meta.tile_buckets) || 1024;
+const gen = () => (S.state ? S.state.gen : S.meta ? S.meta.gen : 0);
+const tkey = (name, L, k) => gen() + '|' + name + '|' + L + '|' + k;
+const tspan = (L) => TB() * Math.pow(2, L);
+function levelFor(span, W) { return Math.max(0, Math.floor(Math.log2(Math.max(1, span / W)))); }
+function maxLevel() { return S.meta ? Math.max(0, Math.ceil(Math.log2(Math.max(1, (S.meta.end + 1) / TB())))) : 0; }
+
+function cacheGet(key, touch) {
+  const v = T.cache.get(key);
+  if (v && touch) { T.cache.delete(key); T.cache.set(key, v); }
+  return v;
+}
+function cachePut(key, v) {
+  T.cache.set(key, v);
+  while (T.cache.size > T.LIMIT) T.cache.delete(T.cache.keys().next().value);
+}
+
+function decodeTile(raw, L, k) {
+  const ts = k * tspan(L);
+  const t = new Float64Array(raw.t.length);
+  let acc = ts;
+  for (let i = 0; i < raw.t.length; i++) { acc += raw.t[i]; t[i] = acc; }
+  return { L, k, ts, te: ts + tspan(L), v0: raw.v0, t, v: raw.v, d: raw.d.map(([a, b, n, h]) => [a + ts, b + ts, n, h]), exact: !!raw.x };
+}
+
+// The tile to draw slot (L, k) from: its own, or an exact ancestor (both
+// "fine"), else the nearest coarser ancestor as a stand-in.
+function sourceFor(name, L, k) {
+  const own = cacheGet(tkey(name, L, k), true);
+  if (own) return { tile: own, fine: true };
+  let coarse = null;
+  const top = maxLevel();
+  for (let up = L + 1; up <= top; up++) {
+    const t = cacheGet(tkey(name, up, Math.floor(k / Math.pow(2, up - L))));
+    if (!t) continue;
+    if (t.exact) return { tile: t, fine: true };
+    if (!coarse) coarse = t;
+  }
+  return coarse ? { tile: coarse, fine: false } : null;
+}
+
+function visibleRows() {
+  const H = $('wavebox').clientHeight, top = $('lists').scrollTop;
+  const first = Math.max(0, Math.floor(top / ROW) - 2);
+  const last = Math.min(S.rows.length - 1, Math.ceil((top + H) / ROW) + 2);
+  return S.rows.slice(first, last + 1);
+}
+
+function slots() {
+  const W = canvasW(), [v0, v1] = S.view;
+  const L = levelFor(v1 - v0, W), TS = tspan(L);
+  const kmax = S.meta ? Math.floor(S.meta.end / TS) : 0;
+  return { L, TS, k0: Math.max(0, Math.floor(v0 / TS)), k1: Math.max(0, Math.min(kmax, Math.floor(v1 / TS))), kmax };
+}
+
+let ensureTimer = null;
+function requestData() {
+  clearTimeout(ensureTimer);
+  ensureTimer = setTimeout(ensureTiles, 50);
+  draw();
+}
+
+function ensureTiles() {
+  if (!S.meta) return;
+  const { L, k0, k1, kmax } = slots();
+  const want = {};
+  let n = 0;
+  // the visible slots first, then one slot of margin each side for panning
+  const ks = [];
+  for (let k = k0; k <= k1; k++) ks.push(k);
+  if (k0 > 0) ks.push(k0 - 1);
+  if (k1 < kmax) ks.push(k1 + 1);
+  for (const r of visibleRows()) {
+    for (const k of ks) {
+      const key = tkey(r.name, L, k);
+      if (T.inflight.has(key)) continue;
+      const src = sourceFor(r.name, L, k);
+      if (src && src.fine) continue;
+      (want[r.name] = want[r.name] || []).push(k);
+      T.inflight.add(key);
+      n++;
+    }
+  }
+  if (!n) return;
+  // a few rows per request so the first rows arrive early
+  const names = Object.keys(want);
+  for (let i = 0; i < names.length; i += 12) {
+    const part = {};
+    for (const nm of names.slice(i, i + 12)) part[nm] = want[nm];
+    fetchTiles(L, part);
+  }
+}
+
+async function fetchTiles(L, want) {
+  const g = gen();
+  T.reqs++;
+  renderNet();
+  try {
+    const r = await fetch('/api/tiles', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ L, want }) });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || r.status);
+    T.bytes += +(r.headers.get('Content-Length') || 0);
+    if (j.gen === g) {
+      for (const [name, tiles] of Object.entries(j.tiles)) {
+        for (const [k, raw] of Object.entries(tiles)) cachePut(tkey(name, L, +k), decodeTile(raw, L, +k));
+      }
+    }
+  } catch (e) { toast(e.message); }
+  finally {
+    for (const [name, ks] of Object.entries(want)) for (const k of ks) T.inflight.delete(g + '|' + name + '|' + L + '|' + k);
+    renderNet();
+    draw();
+  }
+}
+
+function valueIn(tile, a) {
+  const t = tile.t;
+  let lo = 0, hi = t.length - 1, k = -1;
+  while (lo <= hi) { const m = (lo + hi) >> 1; if (t[m] <= a) { k = m; lo = m + 1; } else hi = m - 1; }
+  return k < 0 ? tile.v0 : tile.v[k];
+}
+
+// The points and dense stretches of one row over the visible slots,
+// stitched from whichever tile serves each slot.
+function rowData(name, sl) {
+  const pts = [], dense = [];
+  let stand = 0;
+  const push = (t, v) => { if (!pts.length || pts[pts.length - 1][1] !== v) pts.push([t, v]); };
+  for (let k = sl.k0; k <= sl.k1; k++) {
+    const a = k * sl.TS, b = a + sl.TS;
+    const src = sourceFor(name, sl.L, k);
+    if (!src) { push(a, '?'); stand++; continue; }
+    if (!src.fine) stand++;
+    const tile = src.tile;
+    push(a, valueIn(tile, a));
+    const t = tile.t;
+    let lo = 0, hi = t.length;
+    while (lo < hi) { const m = (lo + hi) >> 1; if (t[m] <= a) lo = m + 1; else hi = m; }
+    // tile points are real changes, or openers of dense stretches whose value
+    // may repeat the one before: keep them all
+    for (let i = lo; i < t.length && t[i] < b; i++) pts.push([t[i], tile.v[i]]);
+    for (const d of tile.d) if (d[1] >= a && d[0] < b) dense.push([Math.max(a, d[0]), Math.min(b, d[1]), d[2], d[3]]);
+  }
+  return { pts, dense, t1: (sl.k1 + 1) * sl.TS, stand };
+}
+
+// cycle numbers: computed locally for a regular clock, else fetched per view
+function clockInfo() { return S.meta && S.meta.clockinfo; }
+let edgeReq = null;
+function edgesInView() {
+  const ci = clockInfo();
+  if (!ci) return null;
+  const [v0, v1] = S.view;
+  if (ci.regular) {
+    const c0 = Math.max(0, Math.ceil((v0 - ci.first) / ci.period));
+    const c1 = Math.min(ci.count - 1, Math.floor((v1 - ci.first) / ci.period));
+    if (c1 - c0 > 4000) return { edge0: c0, edges: null, period: ci.period };
+    const edges = [];
+    for (let c = c0; c <= c1; c++) edges.push(ci.first + c * ci.period);
+    return { edge0: c0, edges, period: ci.period };
+  }
+  const e = S.edges;
+  if (e && e.t0 <= v0 && e.t1 >= v1 && e.gen === gen()) return e;
+  if (!edgeReq) {
+    const span = v1 - v0, t0 = v0 - span, t1 = v1 + span, g = gen();
+    edgeReq = api('/api/edges', { t0, t1 }).then((r) => {
+      S.edges = { ...r, t0, t1, gen: g, period: r.edges && r.edges.length > 1 ? (r.edges[r.edges.length - 1] - r.edges[0]) / (r.edges.length - 1) : null };
+      edgeReq = null; draw();
+    }).catch(() => { edgeReq = null; });
+  }
+  return e && e.gen === gen() ? e : null;
+}
+
+function renderNet() {
+  const kb = T.bytes / 1024;
+  const size = kb < 1024 ? kb.toFixed(1) + ' KB' : (kb / 1024).toFixed(2) + ' MB';
+  $('st-net').textContent = `↓ ${size} · ${T.reqs} req · ${T.cache.size} tiles cached` + (T.inflight.size ? ` · loading ${T.inflight.size}` : '');
 }
 
 let valTimer = null;
@@ -172,6 +349,22 @@ function fmtVal(bits, w, radix) {
   }
 }
 
+// tile values: '0' '1' 'x' 'z' for 1-bit; hex, 'x', 'z' or '~bits' for buses
+function encIsX(v) { return v === 'x' || (v[0] === '~' && v.includes('x')); }
+function encIsZ(v) { return v === 'z' || (v[0] === '~' && !v.includes('x') && v.includes('z')); }
+function fmtEnc(v, w, radix) {
+  if (w === 1 || v === 'x' || v === 'z' || v === '?') return v;
+  if (v[0] === '~') return fmtVal(v.slice(1), w, radix);
+  const n = BigInt('0x' + v);
+  switch (radix) {
+    case 'dec': return n.toString();
+    case 'sdec': return ((n >> BigInt(w - 1)) & 1n ? n - (1n << BigInt(w)) : n).toString();
+    case 'bin': return n.toString(2).padStart(w, '0');
+    case 'oct': return n.toString(8);
+    default: return n.toString(16).padStart(Math.ceil(w / 4), '0');
+  }
+}
+
 function unitOf() { return S.meta ? S.meta.timescale.replace(/^1(?=[a-z])/, '') : ''; }
 function fmtT(t) {
   if (t == null) return '-';
@@ -179,11 +372,14 @@ function fmtT(t) {
   return v.toLocaleString('en-US') + ' ' + unitOf();
 }
 function cycleAt(t) {
-  const d = S.data;
-  if (!d || !d.edges || t == null) return null;
-  let lo = 0, hi = d.edges.length - 1, k = -1;
-  while (lo <= hi) { const m = (lo + hi) >> 1; if (d.edges[m] <= t) { k = m; lo = m + 1; } else hi = m - 1; }
-  return k < 0 ? null : d.edge0 + k;
+  const ci = clockInfo();
+  if (!ci || t == null || t < ci.first) return null;
+  if (ci.regular) return Math.min(ci.count - 1, Math.floor((t - ci.first) / ci.period));
+  const e = S.edges;
+  if (!e || !e.edges || t < e.t0 || t > e.t1) return null;
+  let lo = 0, hi = e.edges.length - 1, k = -1;
+  while (lo <= hi) { const m = (lo + hi) >> 1; if (e.edges[m] <= t) { k = m; lo = m + 1; } else hi = m - 1; }
+  return k < 0 ? null : e.edge0 + k;
 }
 
 // ---------------------------------------------------------------------------
@@ -371,7 +567,7 @@ function addRows(names, index) {
   const add = names.filter((n) => !have.has(n)).map((n) => ({ name: n, radix: 'hex', w: S.width.get(n) || 1 }));
   if (!add.length) return;
   if (index == null) S.rows.push(...add); else S.rows.splice(index, 0, ...add);
-  renderRows(); pushRows(); requestData(true); fetchValues();
+  renderRows(); pushRows(); requestData(); fetchValues();
 }
 
 // ---------------------------------------------------------------------------
@@ -389,7 +585,7 @@ function readColors() {
     bg: g('--wbg'), wave: g('--wave'), bus: g('--wbus'), fill: g('--wfill'), x: g('--wx'), xfill: g('--wxfill'),
     z: g('--wz'), text: g('--wtext'), grid: g('--grid'), edge: g('--edge'), cursor: g('--cursor'),
     marker: g('--marker'), ann: g('--ann'), ruler: g('--ruler'), rtext: g('--rtext'), rowsel: g('--rowsel'),
-    dense: g('--dense'), line: g('--line'),
+    dense: g('--dense'), line: g('--line'), loading: g('--loading'),
   };
 }
 
@@ -418,18 +614,18 @@ function drawNow() {
   const span = v1 - v0;
   const X = (t) => (t - v0) / span * W;
   const scrollTop = $('lists').scrollTop;
-  const d = S.data;
+  const E = edgesInView();
+  const sl = slots();
   ctx.font = '11px ui-monospace, Menlo, Consolas, monospace';
   ctx.textBaseline = 'middle';
 
   // clock edge gridlines
   let cycStep = 0;
-  if (d && d.edges && d.edges.length > 1) {
-    const per = (d.edges[d.edges.length - 1] - d.edges[0]) / (d.edges.length - 1);
-    const ppx = per / span * W;
+  if (E && E.edges && E.period) {
+    const ppx = E.period / span * W;
     if (ppx >= 5) {
       ctx.fillStyle = C.edge;
-      for (const e of d.edges) { const x = X(e); if (x >= 0 && x <= W) ctx.fillRect(Math.round(x), RULER, 1, H - RULER); }
+      for (const e of E.edges) { const x = X(e); if (x >= 0 && x <= W) ctx.fillRect(Math.round(x), RULER, 1, H - RULER); }
     }
     cycStep = niceStep(Math.max(1, 46 / Math.max(ppx, 1e-9)));
   }
@@ -443,8 +639,7 @@ function drawNow() {
     const r = S.rows[i];
     const top = RULER + i * ROW - scrollTop;
     if (S.selected.has(r.name)) { ctx.fillStyle = C.rowsel; ctx.fillRect(0, top, W, ROW); }
-    const sd = d && d.signals[r.name];
-    if (sd) drawSignal(sd, r, top, W, X, C);
+    drawSignal(rowData(r.name, sl), r, top, W, X, C);
   }
   ctx.restore();
 
@@ -459,10 +654,10 @@ function drawNow() {
     ctx.fillRect(x - 0.5, 0, 1, 7);
     ctx.fillText(fmtT(t), x + 3, 8);
   }
-  if (d && d.edges && cycStep) {
+  if (E && E.edges && cycStep) {
     ctx.textAlign = 'center';
-    d.edges.forEach((e, k) => {
-      const c = d.edge0 + k;
+    E.edges.forEach((e, k) => {
+      const c = E.edge0 + k;
       if (c % cycStep) return;
       const x = X(e);
       if (x < -20 || x > W + 20) return;
@@ -520,21 +715,33 @@ function drawNow() {
 }
 
 function drawSignal(sd, r, top, W, X, C) {
-  const pts = [[S.data.t0, sd.v0], ...sd.ch];
+  const pts = sd.pts;
   const hi = top + 4, lo = top + ROW - 5, mid = top + ROW / 2;
   // skip to the first segment that reaches the view
   let s = 0, e = pts.length - 1;
   const v0 = S.view[0];
   while (s < e) { const m = (s + e + 1) >> 1; if (pts[m][0] <= v0) s = m; else e = m - 1; }
   ctx.lineWidth = 1;
+  const dn = sd.dense;
+  let dp = 0;
   for (let k = s; k < pts.length; k++) {
-    const ta = pts[k][0], tb = k + 1 < pts.length ? pts[k + 1][0] : S.data.t1;
+    let ta = pts[k][0];
+    const tb = k + 1 < pts.length ? pts[k + 1][0] : sd.t1;
+    // a point that opens a dense stretch carries the value at its end; draw
+    // that value only after the stretch, the stretch itself as a block
+    while (dp < dn.length && dn[dp][1] < ta) dp++;
+    const inDense = dp < dn.length && dn[dp][0] <= ta && dn[dp][1] > ta;
+    if (inDense) { ta = dn[dp][1]; if (ta >= tb) continue; }
     let xa = X(ta), xb = X(tb);
     if (xa > W) break;
     if (xb < 0) continue;
     xa = Math.max(xa, -2); xb = Math.min(xb, W + 2);
     const v = pts[k][1];
-    const isx = v.includes('x'), isz = !isx && v.includes('z');
+    if (v === '?') { // not fetched yet
+      ctx.fillStyle = C.loading; ctx.fillRect(xa, hi, xb - xa, lo - hi);
+      continue;
+    }
+    const isx = encIsX(v), isz = encIsZ(v);
     if (r.w === 1) {
       if (isx) { ctx.fillStyle = C.xfill; ctx.fillRect(xa, hi, xb - xa, lo - hi); ctx.strokeStyle = C.x; strokeLine(xa, hi, xb, hi); strokeLine(xa, lo, xb, lo); }
       else if (isz) { ctx.strokeStyle = C.z; strokeLine(xa, mid, xb, mid); }
@@ -543,7 +750,7 @@ function drawSignal(sd, r, top, W, X, C) {
         const y = v === '1' ? hi : lo;
         if (v === '1') { ctx.fillStyle = C.fill; ctx.fillRect(xa, hi, xb - xa, lo - hi); }
         strokeLine(xa, y, xb, y);
-        if (k > s || ta > v0) {
+        if (!inDense && (k > s || ta > v0)) {
           const pv = k > 0 ? pts[k - 1][1] : v;
           if (pv !== v) { ctx.strokeStyle = C.wave; strokeLine(Math.round(xa) + 0.5, hi, Math.round(xa) + 0.5, lo, true); }
         }
@@ -561,7 +768,7 @@ function drawSignal(sd, r, top, W, X, C) {
       }
       const room = xb - xa - 8;
       if (room > 10) {
-        let txt = fmtVal(v, r.w, r.radix);
+        let txt = fmtEnc(v, r.w, r.radix);
         let tw = ctx.measureText(txt).width;
         if (tw > room) {
           const per = tw / txt.length;
@@ -578,13 +785,18 @@ function drawSignal(sd, r, top, W, X, C) {
       }
     }
   }
-  // stretches with more changes than pixels
-  ctx.fillStyle = C.dense;
-  for (const [a, b] of sd.dense) {
+  // stretches with more changes than pixels: for a 1-bit signal the shade
+  // says how much of the time it is 1, for a bus how busy it is
+  ctx.fillStyle = C.wave;
+  for (const [a, b, n, h] of dn) {
     const xa = X(a), xb = Math.max(X(b), xa + 1);
     if (xb < 0 || xa > W) continue;
-    ctx.fillRect(xa, hi, xb - xa, lo - hi);
+    // a stretch narrower than two pixels is a short event (a one cycle
+    // pulse seen from far away): draw it at full strength so it is not lost
+    ctx.globalAlpha = xb - xa < 2 ? 1 : r.w === 1 ? 0.25 + 0.6 * h : 0.3 + 0.55 * Math.min(1, n / Math.max(1, (xb - xa) * 2));
+    ctx.fillRect(xa, hi, Math.max(1, xb - xa), lo - hi);
   }
+  ctx.globalAlpha = 1;
 }
 
 function strokeLine(x1, y1, x2, y2, exact) {
@@ -709,7 +921,7 @@ canvas.addEventListener('wheel', (e) => {
     $('lists').scrollTop += e.deltaY;
   }
 }, { passive: false });
-$('lists').addEventListener('scroll', draw);
+$('lists').addEventListener('scroll', requestData);
 window.addEventListener('resize', () => { requestData(); draw(); });
 
 // names pane: select, reorder, drop from the signal list, context menu
@@ -805,7 +1017,7 @@ function removeSelected() {
   if (!S.selected.size) return;
   S.rows = S.rows.filter((r) => !S.selected.has(r.name));
   S.selected.clear();
-  renderRows(); pushRows(); pushSelect(); requestData(true);
+  renderRows(); pushRows(); pushSelect(); requestData();
 }
 function moveSel(dir) {
   const idx = S.rows.map((r, i) => (S.selected.has(r.name) ? i : -1)).filter((i) => i >= 0);
