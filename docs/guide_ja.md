@@ -61,6 +61,27 @@ tools/waveview.py serve w.fst            # URL(トークン付き)が表示さ�
 全体表示まで 29 KB / 約 1.2 秒、そこから 4096 倍までズームインしても累計 675 KB。
 ズームアウトして戻る操作では転送なし。
 
+## Verdi との連携: FSDB と nWave の .rc
+
+```sh
+tools/waveview.py serve sim.fsdb --rc signal.rc --rtl core/filelist.f
+```
+
+- **FSDB をそのまま開ける。** ただし FSDB は Synopsys の非公開フォーマットで、
+  読めるのは Verdi 付属のツールだけなので、Verdi がインストールされたサーバで
+  使う。変換には Verdi の `fsdb2vcd` を使い、`$FSDB2VCD` → `PATH` → `$VERDI_HOME/bin`
+  の順に探す。変換と解析は最初の 1 回だけで、以降はキャッシュを使う
+  (FSDB が更新されたら作り直す)
+- 巨大な FSDB は `FSDB2VCD_CMD` で fsdb2vcd のコマンドラインを変え、fsdb2vcd 側の
+  スコープ・時間範囲の指定で絞れる (既定 `{bin} {in} -o {out}`)
+- **nWave の保存ファイル (.rc) を読める** (`--rc`)。`addSignal` の信号と基数
+  (`-HEX` `-DEC` `-2COMP` `-BIN` `-OCT`)、`cursor` `marker` `zoom` を取り込む。
+  階層は末尾一致で探すので、VCS の FSDB (`/tb/u_dut/...`) 用の .rc を
+  Verilator の FST (`TOP.tb.u_dut...`) に使うこともできる
+- ツールバーの `.rc` (または `tools/waveview.py rc`) で今の表示を nWave の .rc として
+  書き出せる。Verdi で `File > Restore Signal` すれば同じ信号・カーソル・ズームで開く
+- wavequery / wave2img も同じ仕組みで .fsdb を読める
+
 ## 画面と操作 (GTKWave / Verdi nWave 準拠)
 
 左に階層ツリーと信号リスト (GTKWave の SST)、中央に信号名と値 (カーソル位置)、右に波形。

@@ -19,6 +19,11 @@ How it works:
 - With --clock, a gridline is drawn at every rising edge and the x axis is
   numbered in clock cycles instead of raw time
 
+FSDB input:
+- .fsdb is Synopsys' closed format. It is converted to VCD with Verdi's own
+  fsdb2vcd ($FSDB2VCD, PATH or $VERDI_HOME/bin); FSDB2VCD_CMD changes the
+  command line. Without a Verdi installation FSDB cannot be read
+
 FST input:
 - .fst is converted to VCD first. The converter is tools/fst2vcd_mini.c, built
   against the GTKWave FST library that ships inside Verilator
@@ -169,7 +174,9 @@ def parse_vcd(path):
                     except ValueError:
                         width = 1
                     code = fields[2]
-                    name = fields[3]
+                    # some writers (VCS, fsdb2vcd) glue the packed range to
+                    # the name: data[7:0]. Keep [3] (an element), drop [7:0]
+                    name = re.sub(r"\[\d+:\d+\]$", "", fields[3])
                     full = ".".join(scope + [name])
                     dump.signals.append(Signal(full, width, code, len(dump.signals)))
                     code_width[code] = width
@@ -394,8 +401,53 @@ def fst_to_vcd(fst_path, out_path):
     return False
 
 
+def fsdb_converter():
+    """Verdi's fsdb2vcd: $FSDB2VCD, then PATH, then $VERDI_HOME/bin."""
+    cands = [os.environ.get("FSDB2VCD"), shutil.which("fsdb2vcd")]
+    verdi = os.environ.get("VERDI_HOME")
+    if verdi:
+        cands.append(os.path.join(verdi, "bin", "fsdb2vcd"))
+    for c in cands:
+        if c and os.path.isfile(c) and os.access(c, os.X_OK):
+            return c
+    return None
+
+
+def fsdb_to_vcd(fsdb_path, out_path):
+    """Convert an FSDB dump to VCD with Verdi's own fsdb2vcd.
+
+    FSDB is a closed format: only Synopsys' tools read it, so this needs a
+    Verdi installation where the dump is. The command line can be changed
+    with FSDB2VCD_CMD, a template with {bin} {in} {out} (default
+    "{bin} {in} -o {out}"), e.g. to add fsdb2vcd's own scope or time window
+    options for a very large dump.
+    """
+    import shlex
+
+    binary = fsdb_converter()
+    if binary is None:
+        sys.stderr.write(
+            "error: cannot read FSDB input.\n"
+            "  FSDB is Synopsys' closed format; it is read with fsdb2vcd from Verdi.\n"
+            "  Put fsdb2vcd on PATH, set VERDI_HOME, or set FSDB2VCD to its path.\n"
+        )
+        return False
+    template = os.environ.get("FSDB2VCD_CMD", "{bin} {in} -o {out}")
+    cmd = [w.format(**{"bin": binary, "in": fsdb_path, "out": out_path}) for w in shlex.split(template)]
+    done = subprocess.run(cmd, capture_output=True, text=True)
+    if done.returncode != 0 or not os.path.isfile(out_path):
+        sys.stderr.write("error: fsdb2vcd failed (%s):\n%s\n" % (" ".join(cmd), (done.stderr or done.stdout).strip()[-2000:]))
+        return False
+    return True
+
+
 def load_dump(path, tmpdir):
-    """Load a dump, converting FST to VCD first when needed."""
+    """Load a dump, converting FST or FSDB to VCD first when needed."""
+    if path.lower().endswith(".fsdb"):
+        converted = os.path.join(tmpdir, "converted.vcd")
+        if not fsdb_to_vcd(path, converted):
+            return None
+        return parse_vcd(converted)
     if path.lower().endswith(".fst"):
         converted = os.path.join(tmpdir, "converted.vcd")
         if not fst_to_vcd(path, converted):

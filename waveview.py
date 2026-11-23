@@ -85,7 +85,7 @@ def registry_dir():
 class Hub:
     """The loaded dump, the shared view state, and the push channel."""
 
-    def __init__(self, dump_path, gtkw=None, rtl=None):
+    def __init__(self, dump_path, gtkw=None, rtl=None, rc=None):
         self.dump_path = os.path.abspath(dump_path)
         self.state_path = self.dump_path + ".waveview.json"
         self.lock = threading.RLock()
@@ -121,6 +121,8 @@ class Hub:
         self._restore()
         if gtkw:
             self._load_gtkw(gtkw)
+        if rc:
+            self._load_rc(rc)
         self._fix_state()
         self._save_timer = None
 
@@ -177,6 +179,93 @@ class Hub:
                     sigs.append({"name": name, "radix": radix})
         if sigs:
             self.state["signals"] = sigs
+
+    # -- Verdi nWave signal files (.rc) ---------------------------------------
+
+    def _rc_lookup(self, path):
+        """A dump signal for an nWave path (/tb/u_dut/x[31:0]). FSDB from a
+        commercial simulator has no TOP prefix and Verilator dumps do, so
+        the name is matched as a unique suffix."""
+        name = re.sub(r"\[\d+:\d+\]$", "", path.strip().strip('"')).strip("/").replace("/", ".")
+        if name in self.wave.by_name:
+            return name
+        tail = "." + name
+        hits = [s.name for s in self.wave.signals if s.name.endswith(tail)]
+        return hits[0] if len(hits) == 1 else None
+
+    def _load_rc(self, path):
+        """Signal list, groups (as comment-less order), cursor, marker and
+        zoom of an nWave save file."""
+        sigs, missing = [], []
+        with open(path, errors="replace") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line or line.startswith(";"):
+                    continue
+                words = line.split()
+                cmd = words[0]
+                try:
+                    if cmd == "addSignal":
+                        radix = "hex"
+                        flags = {w.upper() for w in words[1:] if w.startswith("-")}
+                        if "-DEC" in flags:
+                            radix = "sdec" if flags & {"-2COMP", "-SIGNED"} else "dec"
+                        elif "-BIN" in flags:
+                            radix = "bin"
+                        elif "-OCT" in flags:
+                            radix = "oct"
+                        args = [w for k, w in enumerate(words[1:], 1)
+                                if not w.startswith("-") and words[k - 1] not in ("-h", "-w", "-c", "-color", "-ls")]
+                        if not args:
+                            continue
+                        name = self._rc_lookup(args[-1])
+                        if name:
+                            sigs.append({"name": name, "radix": radix})
+                        else:
+                            missing.append(args[-1])
+                    elif cmd == "cursor":
+                        self.state["cursor"] = float(words[1])
+                    elif cmd == "marker" and float(words[1]) > 0:
+                        self.state["marker"] = float(words[1])
+                    elif cmd == "zoom" and len(words) >= 3:
+                        self.state["view"] = [float(words[1]), float(words[2])]
+                except (ValueError, IndexError):
+                    continue
+        if sigs:
+            self.state["signals"] = sigs
+        if missing:
+            sys.stderr.write("waveview: %d signals of %s are not in the dump, e.g. %s\n"
+                             % (len(missing), path, ", ".join(missing[:3])))
+
+    def export_rc(self):
+        """The view as an nWave save file, to open the same signals in Verdi."""
+        st = self.state
+        unit = re.sub(r"^1(?=[a-z])", "", self.wave.timescale) or "ps"
+        lines = [
+            "Magic 271485",
+            "Revision waveview",
+            "; written by scariv tools/waveview.py",
+            "; File list:",
+            'openDirFile -d / "" "%s"' % self.dump_path,
+            "windowTimeUnit %s" % ("1" + unit if unit[0].isalpha() else unit),
+            "zoom %f %f" % (st["view"][0], st["view"][1]),
+        ]
+        if st["cursor"] is not None:
+            lines.append("cursor %f" % st["cursor"])
+        if st["marker"] is not None:
+            lines.append("marker %f" % st["marker"])
+        lines += ["; signal list", 'addGroup "G1"', 'activeDirFile "" "%s"' % self.dump_path]
+        flags = {"hex": "-HEX", "dec": "-UNSIGNED -DEC", "sdec": "-2COMP -DEC", "bin": "-BIN", "oct": "-OCT"}
+        for s in st["signals"]:
+            sig = self.wave.by_name[s["name"]]
+            comps = s["name"].split(".")
+            if comps[0] == "TOP" and len(comps) > 2:  # Verilator's wrapper scope
+                comps = comps[1:]
+            path = "/" + "/".join(comps) + ("[%d:0]" % (sig.width - 1) if sig.width > 1 else "")
+            f = flags.get(s["radix"], "-HEX") + " " if sig.width > 1 else ""
+            lines.append("addSignal -h 15 %s%s" % (f, path))
+        lines += ['addGroup "G2"', "", "; getSignalForm Scope Hierarchy Status", "; active file of getSignalForm"]
+        return "\n".join(lines) + "\n"
 
     def _fix_state(self):
         """Drop what the (possibly rebuilt) dump no longer has."""
@@ -944,6 +1033,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 table = query.get("table", ["0"])[0] == "1"
                 with hub.lock:
                     return self._send(200, hub.snapshot(table=table, radix=query.get("radix", ["hex"])[0]))
+            if path == "/api/export.rc":
+                with hub.lock:
+                    return self._send(200, hub.export_rc(), "text/plain",
+                                      {"Content-Disposition": 'attachment; filename="waveview.rc"'})
             if path == "/api/export.gtkw":
                 with hub.lock:
                     return self._send(200, hub.export_gtkw(), "text/plain",
@@ -1066,7 +1159,7 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 
 def cmd_serve(args):
-    hub = Hub(args.dump, gtkw=args.gtkw, rtl=args.rtl or (["."] if not args.no_rtl else None))
+    hub = Hub(args.dump, gtkw=args.gtkw, rc=args.rc, rtl=args.rtl or (["."] if not args.no_rtl else None))
     token = args.token or secrets.token_urlsafe(16)
     Handler.hub = hub
     Handler.token = token
@@ -1398,6 +1491,8 @@ def run_client(args):
             c.cmd("source", signal=info["scope"] + "." + info["signal"], loads=args.loads or None)
     elif args.cmd == "gtkw":
         sys.stdout.write(c.call("/api/export.gtkw"))
+    elif args.cmd == "rc":
+        sys.stdout.write(c.call("/api/export.rc"))
     return 0
 
 
@@ -1489,6 +1584,34 @@ def run_selftest():
     check("source: input traced to parent", any(t["kind"] == "parent_conn" and t["signal"] == "din" for t in tr))
     hub2.op_source({"signal": "u_leaf.r_q"})
     check("source: op_source opens the driver", hub2.state["source"]["line"] == 9)
+    # Verdi interop: an nWave .rc in, an .rc out, and FSDB through fsdb2vcd
+    rc = os.path.join(tmp, "v.rc")
+    with open(rc, "w") as fh:
+        fh.write('Magic 271485\nzoom 10.000000 90.000000\ncursor 50.000000\naddGroup "G1"\n'
+                 "addSignal -h 15 /tb_wave/dut/clk\naddSignal -h 15 -2COMP -DEC /tb_wave/dut/data[15:0]\n"
+                 "addSignal -h 15 /tb_wave/dut/gone\n")
+    hub3 = Hub(path, rc=rc)
+    check("nWave .rc import", [s["name"] for s in hub3.state["signals"]] == ["tb_wave.dut.clk", "tb_wave.dut.data"]
+          and hub3.state["signals"][1]["radix"] == "sdec" and hub3.state["cursor"] == 50 and hub3.state["view"] == [10, 90])
+    out_rc = hub3.export_rc()
+    check("nWave .rc export", "addSignal -h 15 -2COMP -DEC /tb_wave/dut/data[15:0]" in out_rc and "cursor 50.000000" in out_rc)
+    fake = os.path.join(tmp, "fsdb2vcd")
+    with open(fake, "w") as fh:
+        fh.write('#!/bin/sh\n# stand-in for Verdi\'s fsdb2vcd: <in> -o <out>\ncp "%s" "$3"\n' % path)
+    os.chmod(fake, 0o755)
+    fsdb = os.path.join(tmp, "t.fsdb")
+    with open(fsdb, "w") as fh:
+        fh.write("stand-in")
+    old = os.environ.get("FSDB2VCD")
+    os.environ["FSDB2VCD"] = fake
+    try:
+        w = wq.load(fsdb)
+        check("FSDB through fsdb2vcd", "tb_wave.dut.data" in w.by_name)
+    finally:
+        if old is None:
+            os.environ.pop("FSDB2VCD", None)
+        else:
+            os.environ["FSDB2VCD"] = old
     httpd.shutdown()
     hub._save()
     check("state saved next to the dump", os.path.isfile(path + ".waveview.json"))
@@ -1507,6 +1630,7 @@ def build_parser():
     s.add_argument("--host", default="127.0.0.1", help="bind address (default 127.0.0.1)")
     s.add_argument("--token", help="fixed access token (default: random)")
     s.add_argument("--gtkw", help="load the signal list from a GTKWave save file")
+    s.add_argument("--rc", help="load the signal list, cursor and zoom from a Verdi nWave save file (.rc)")
     s.add_argument("--rtl", action="append",
                    help="RTL sources for the source view: a .f filelist, a file or a directory "
                         "(repeatable; default: the current directory, without vendor/)")
@@ -1563,6 +1687,7 @@ def build_parser():
     s.add_argument("--wait", type=int, default=0, help="block up to this many seconds for one")
     s.add_argument("--after", type=int, default=0, help="only messages with a larger id")
     sub.add_parser("gtkw", parents=[client], help="print the view as a GTKWave save file")
+    sub.add_parser("rc", parents=[client], help="print the view as a Verdi nWave save file (.rc)")
     s = sub.add_parser("src", parents=[client],
                        help="where a signal is declared and driven, with values at the cursor")
     s.add_argument("signal", help="dump signal (full name or unique suffix)")
@@ -1583,6 +1708,9 @@ def main(argv=None):
     except wq.QueryError as exc:
         print("error: %s" % exc, file=sys.stderr)
         return 2
+    except BrokenPipeError:  # output piped into head and the like
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        return 0
 
 
 if __name__ == "__main__":
