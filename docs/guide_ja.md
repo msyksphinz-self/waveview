@@ -115,6 +115,11 @@ waveview.py serve sim.fsdb --rc signal.rc --rtl core/filelist.f
   fsdbsrv をビルドしてサーバ側で動かす (FST の `fstsrv` と同じ仕組み、
   「Windows から」の節を参照)。サーバ側のビルドは `WAVEVIEW_REMOTE_FSDBSRV`
   で差し替えられる
+- サーバのログイン環境に `VERDI_HOME` が無い (module load などで都度設定する)
+  場合は、手元で `WAVEVIEW_REMOTE_ENV="VERDI_HOME=/tools/synopsys/verdi/Y-2026.03-SP2"`
+  を設定する。サーバで実行する全コマンドにその環境変数が付く
+  (ssh はログインシェルを通さないので、サーバの `~/.bashrc` の export は効かない
+  ことがある)
 - FsdbReader ライブラリが無い (fsdb2vcd だけある) 環境では、従来どおり Verdi の
   `fsdb2vcd` で VCD に変換して読む (`$FSDB2VCD` → `PATH` → `$VERDI_HOME/bin`
   の順に探す。変換と解析は最初の 1 回だけで、以降はキャッシュを使う)。

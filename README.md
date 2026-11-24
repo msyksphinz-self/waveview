@@ -71,9 +71,13 @@ waveview.cmd serve build01:/work/sim/w.fst --rtl build01:/work/proj/rtl/filelist
 ```
 
 The same with an FSDB, read in place by the server's Verdi (`VERDI_HOME` or
-`fsdb2vcd` on the server's PATH; the first time builds `fsdbsrv` there):
+`fsdb2vcd` on the server's PATH; the first time builds `fsdbsrv` there).
+When the server's login environment does not say where Verdi is, say it
+from here with `WAVEVIEW_REMOTE_ENV`, which sets variables for every command
+run on the server:
 
 ```sh
+export WAVEVIEW_REMOTE_ENV="VERDI_HOME=/tools/synopsys/verdi/Y-2026.03-SP2"
 python3 waveview.py serve build01:/work/sim/w.fsdb --rtl build01:/work/proj/rtl/filelist.f --rtl-root /work/proj --window
 ```
 
