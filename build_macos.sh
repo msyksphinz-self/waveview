@@ -55,6 +55,7 @@ cd "$ROOT"
     --distpath "$WORK/dist" --workpath "$WORK/work" --specpath "$WORK/work" \
     --add-data "$ROOT/waveview_ui:waveview_ui" \
     --add-data "$ROOT/fstsrv.c:." \
+    --add-data "$ROOT/fsdbsrv.cc:." \
     --add-data "$ROOT/rtlindex.py:." \
     --add-binary "$WORK/helpers/fstsrv:." \
     --add-binary "$WORK/helpers/fst2vcd_mini:." \

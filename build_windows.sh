@@ -41,7 +41,7 @@ WIN_TEMP="$(cd /mnt/c && cmd.exe /c 'echo %TEMP%' 2>/dev/null | tr -d '\r' | tai
 PACK="$(wslpath -u "$WIN_TEMP")/waveview_build"
 rm -rf "$PACK/src"
 mkdir -p "$PACK/src"
-cp -r "$ROOT"/*.py "$ROOT"/fstsrv.c "$ROOT"/fst2vcd_mini.c "$ROOT"/waveview_ui "$WORK"/helpers/*.exe "$PACK/src/"
+cp -r "$ROOT"/*.py "$ROOT"/fstsrv.c "$ROOT"/fsdbsrv.cc "$ROOT"/fst2vcd_mini.c "$ROOT"/waveview_ui "$WORK"/helpers/*.exe "$PACK/src/"
 cd "$PACK"
 [ -f pyenv/Scripts/python.exe ] || python.exe -m venv pyenv
 pyenv/Scripts/python.exe -m pip -q install pyinstaller
@@ -50,6 +50,7 @@ cd src
     --distpath ../dist --workpath ../work --specpath ../work \
     --add-data "$(wslpath -w "$PACK/src/waveview_ui");waveview_ui" \
     --add-data "$(wslpath -w "$PACK/src/fstsrv.c");." \
+    --add-data "$(wslpath -w "$PACK/src/fsdbsrv.cc");." \
     --add-data "$(wslpath -w "$PACK/src/rtlindex.py");." \
     --add-binary "$(wslpath -w "$PACK/src/fstsrv.exe");." \
     --add-binary "$(wslpath -w "$PACK/src/fst2vcd_mini.exe");." \
