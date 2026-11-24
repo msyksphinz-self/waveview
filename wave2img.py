@@ -20,9 +20,12 @@ How it works:
   numbered in clock cycles instead of raw time
 
 FSDB input:
-- .fsdb is Synopsys' closed format. It is converted to VCD with Verdi's own
-  fsdb2vcd ($FSDB2VCD, PATH or $VERDI_HOME/bin); FSDB2VCD_CMD changes the
-  command line. Without a Verdi installation FSDB cannot be read
+- .fsdb is Synopsys' closed format, readable only with a Verdi installation.
+  The viewer and wavequery read it in place through fsdbsrv.cc, built on
+  demand against Verdi's FsdbReader library ($VERDI_HOME/share/FsdbReader;
+  WAVEVIEW_FSDBSRV names one built elsewhere). This tool, and the others
+  without that library, convert it to VCD with Verdi's own fsdb2vcd
+  ($FSDB2VCD, PATH or $VERDI_HOME/bin); FSDB2VCD_CMD changes the command line
 
 FST input:
 - .fst is converted to VCD first. The converter is fst2vcd_mini.c, built
@@ -302,12 +305,14 @@ def verilator_root():
 
 def fst_include():
     """The directory of Verilator's copy of the GTKWave FST library (fstapi.c),
-    or None: Verilator 5.041 and later ship a writer only."""
-    root = verilator_root()
-    if root is None:
-        return None
-    include = os.path.join(root, "include", "gtkwave")
-    return include if os.path.isfile(os.path.join(include, "fstapi.c")) else None
+    or None: Verilator 5.041 and later ship a writer only. When the verilator
+    on PATH is such a one, $VERILATOR_ROOT may still point at older sources."""
+    for root in (verilator_root(), os.environ.get("VERILATOR_ROOT")):
+        if root:
+            include = os.path.join(root, "include", "gtkwave")
+            if os.path.isfile(os.path.join(include, "fstapi.c")):
+                return include
+    return None
 
 
 def cache_dir():
@@ -424,6 +429,74 @@ def fsdb_converter():
     for c in cands:
         if c and os.path.isfile(c) and os.access(c, os.X_OK):
             return c
+    return None
+
+
+def verdi_home():
+    """The Verdi installation: $VERDI_HOME, else the one whose verdi or
+    fsdb2vcd is on PATH. None without one."""
+    home = os.environ.get("VERDI_HOME")
+    if home and os.path.isdir(home):
+        return home
+    for exe in ("verdi", "fsdb2vcd"):
+        p = shutil.which(exe)
+        if p:
+            home = os.path.dirname(os.path.dirname(os.path.realpath(p)))
+            if os.path.isdir(os.path.join(home, "share", "FsdbReader")):
+                return home
+    return None
+
+
+def fsdb_reader():
+    """(include dir, library dir) of Verdi's FsdbReader library, the only
+    way to read FSDB without converting it. None without Verdi."""
+    home = verdi_home()
+    if home is None:
+        return None
+    include = os.path.join(home, "share", "FsdbReader")
+    if not os.path.isfile(os.path.join(include, "ffrAPI.h")):
+        return None
+    for sub in ("LINUX64", "linux64", "LINUX", "linux", ""):
+        lib = os.path.join(include, sub) if sub else include
+        if any(f.startswith("libnffr.") for f in (os.listdir(lib) if os.path.isdir(lib) else ())):
+            return include, lib
+    return None
+
+
+def build_fsdb_tool(verbose=True):
+    """Compile fsdbsrv.cc against Verdi's FsdbReader library. Returns the
+    binary path, or None where there is no Verdi (FSDB is then converted
+    with fsdb2vcd). WAVEVIEW_FSDBSRV names a binary built elsewhere."""
+    override = os.environ.get("WAVEVIEW_FSDBSRV")
+    if override:
+        return override
+    source = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fsdbsrv.cc")
+    if not os.path.isfile(source):
+        return None
+    binary = os.path.join(cache_dir(), "fsdbsrv")
+    if os.path.isfile(binary) and os.path.getmtime(binary) >= os.path.getmtime(source):
+        return binary
+    reader = fsdb_reader()
+    if reader is None:
+        if verbose and verdi_home() is not None:
+            sys.stderr.write("warning: no FsdbReader library (share/FsdbReader) in %s: FSDB goes through fsdb2vcd\n"
+                             % verdi_home())
+        return None
+    include, lib = reader
+    compiler = os.environ.get("CXX") or shutil.which("c++") or shutil.which("g++")
+    if compiler is None:
+        if verbose:
+            sys.stderr.write("warning: no C++ compiler found for the FSDB reader\n")
+        return None
+    cmd = [compiler, "-O2", "-w", "-I" + include, "-o", binary, source, "-L" + lib, "-Wl,-rpath," + lib,
+           "-lnffr", "-lnsys", "-ldl", "-lpthread", "-lz"]
+    done = subprocess.run(cmd, capture_output=True, text=True)
+    if done.returncode == 0 and os.path.isfile(binary):
+        return binary
+    if verbose:
+        sys.stderr.write("warning: building the FSDB reader failed (FSDB goes through fsdb2vcd):\n")
+        sys.stderr.write("  " + " ".join(cmd) + "\n")
+        sys.stderr.write((done.stderr or done.stdout).strip()[-2000:] + "\n")
     return None
 
 

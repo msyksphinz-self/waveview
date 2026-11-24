@@ -63,15 +63,19 @@ class ArithEdges:
 
 
 class LazyFst(wq.Wave):
+    """A dump read in place through a wave server process: fstsrv.c for FST,
+    fsdbsrv.cc for FSDB (the same protocol)."""
+
     lazy = True
 
-    def __init__(self, path, argv=None):
+    def __init__(self, path, argv=None, tool="fstsrv"):
         if argv is None:
             binary = w2i.build_fst_tool("fstsrv", verbose=True)
             if binary is None:
                 raise wq.QueryError("cannot build fstsrv.c (needs a C compiler and Verilator's FST library)")
             argv = [binary, path]
         self.path = path
+        self.tool = tool
         self.proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      text=True, bufsize=1 << 16, encoding="ascii", errors="replace")
         self.io = threading.Lock()
@@ -79,7 +83,7 @@ class LazyFst(wq.Wave):
         if not head and self.proc.poll() is not None:
             raise wq.QueryError("the wave server for %s exited (%d)" % (path, self.proc.returncode))
         if head != "wavesrv 1":
-            raise wq.QueryError("fstsrv could not open %s: %s" % (path, head))
+            raise wq.QueryError("%s could not open %s: %s" % (tool, path, head))
         dump = w2i.Dump()
         exp = 0
         width_of = {}
@@ -144,9 +148,9 @@ class LazyFst(wq.Wave):
                 if line == ".":
                     return out
                 if line.startswith("!"):
-                    raise wq.QueryError("fstsrv: " + line[1:].strip())
+                    raise wq.QueryError("%s: %s" % (self.tool, line[1:].strip()))
                 out.append(line)
-            raise wq.QueryError("fstsrv stopped (dump %s)" % self.path)
+            raise wq.QueryError("%s stopped (dump %s)" % (self.tool, self.path))
 
     def _read(self, codes, t0, t1):
         """{code: (prior, [times], [values])} for [t0, t1]."""
@@ -338,16 +342,17 @@ def _timescale(exp):
 
 
 class RemoteFst(LazyFst):
-    """An FST on another machine, read through fstsrv over ssh (remote.py)."""
+    """An FST or FSDB on another machine, read through fstsrv or fsdbsrv
+    running there, over ssh (remote.py)."""
 
-    def __init__(self, spec):
+    def __init__(self, spec, tool="fstsrv"):
         import remote
 
         r, path = remote.parse(spec)
         self.remote = r
         for attempt in (0, 1):
             try:
-                super().__init__(spec, argv=r.fstsrv_argv(path))
+                super().__init__(spec, argv=r.srv_argv(path, tool), tool=tool)
                 return
             except remote.RemoteError as exc:
                 raise wq.QueryError(str(exc))
@@ -355,17 +360,26 @@ class RemoteFst(LazyFst):
                 if attempt:
                     raise
                 # the remembered binary may be gone (a cleaned cache): build again
-                r.forget_fstsrv()
+                r.forget_srv(tool)
 
 
 def open_lazy(path):
-    """A lazy source for path, or None when this format has none."""
+    """A lazy source for path, or None when this format has none here."""
     import remote
 
+    ext = os.path.splitext(path)[1].lower()
     if remote.is_remote(path):
-        if not path.lower().endswith(".fst"):
-            raise wq.QueryError("remote dumps are served for FST only (convert or dump FST on the server)")
-        return RemoteFst(path)
-    if path.lower().endswith(".fst") and os.environ.get("WAVE_EAGER") != "1":
+        if ext == ".fst":
+            return RemoteFst(path)
+        if ext == ".fsdb":
+            return RemoteFst(path, tool="fsdbsrv")
+        raise wq.QueryError("remote dumps are served for FST and FSDB only (convert or dump FST on the server)")
+    if os.environ.get("WAVE_EAGER") == "1":
+        return None
+    if ext == ".fst":
         return LazyFst(path)
+    if ext == ".fsdb":
+        binary = w2i.build_fsdb_tool(verbose=True)
+        if binary is not None:
+            return LazyFst(path, argv=[binary, path], tool="fsdbsrv")
     return None

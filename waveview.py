@@ -29,9 +29,10 @@ Why it is built this way:
   the next start. --gtkw loads a GTKWave save file, and /api/export.gtkw
   writes one, so the same signal list opens in GTKWave too
 
-From a desktop (Windows included) the dump can stay on the build server:
-`serve build01:/work/sim/w.fst` reads it through fstsrv.c running there
-over ssh (remote.py); only what the view asks for crosses the link.
+From a desktop (Windows and macOS included) the dump can stay on the build
+server: `serve build01:/work/sim/w.fst` reads it through fstsrv.c running
+there over ssh (remote.py); only what the view asks for crosses the link.
+An FSDB there is read the same way through fsdbsrv.cc on the server's Verdi.
 
 Security: the server binds to 127.0.0.1 and every request needs a random
 token (in the printed URL, then a cookie). On a shared server other users
@@ -2004,7 +2005,8 @@ def run_selftest():
             check("remote: RTL indexed on the server and read over ssh",
                   "leaf" in doc["modules"] and "module leaf" in got[os.path.join(src_dir, "t.sv")])
             seen = opener.list_remote("buildhost", tmp)
-            check("remote: directory listing", seen["path"] == os.path.realpath(tmp)
+            # pwd on the "server" may spell the directory through a symlink (macOS: /var -> /private/var)
+            check("remote: directory listing", os.path.realpath(seen["path"]) == os.path.realpath(tmp)
                   and any(e["name"] == "r.fst" and e["size"] == os.path.getsize(fst) for e in seen["entries"])
                   and any(e["name"] == "rtl" and e["dir"] for e in seen["entries"])
                   and not any(e["name"] == "t.vcd" for e in seen["entries"]))

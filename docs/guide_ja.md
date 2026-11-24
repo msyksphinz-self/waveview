@@ -68,9 +68,10 @@ FST は VCD に変換もしないし、メモリに読み込みもしない。`f
 
 VCD は形式上インデックスがないので先頭から全部読むしかない。大きいものは
 一度 FST にしてから使う (GTKWave の `vcd2fst`、あるいはシミュレータで
-直接 FST を出す: Verilator なら `--trace-fst`)。FSDB は今は fsdb2vcd 経由
-なので大きいものは同じ問題がある。Verdi の FsdbReader で同じプロトコルを話す
-`fsdbsrv` を作れば FST と同じ動きになる (Verdi 環境が必要)。
+直接 FST を出す: Verilator なら `--trace-fst`)。FSDB は Verdi のある環境なら
+同じプロトコルを話す `fsdbsrv` (fsdbsrv.cc, Verdi の FsdbReader ライブラリで
+ビルド) でその場で読むので FST と同じ動きになる。Verdi が無ければ fsdb2vcd
+経由で、大きいものは VCD と同じ問題がある。
 
 ## 波形データはジャストインタイムに取得する
 
@@ -102,13 +103,25 @@ VCD は形式上インデックスがないので先頭から全部読むしか�
 waveview.py serve sim.fsdb --rc signal.rc --rtl core/filelist.f
 ```
 
-- **FSDB をそのまま開ける。** ただし FSDB は Synopsys の非公開フォーマットで、
-  読めるのは Verdi 付属のツールだけなので、Verdi がインストールされたサーバで
-  使う。変換には Verdi の `fsdb2vcd` を使い、`$FSDB2VCD` → `PATH` → `$VERDI_HOME/bin`
-  の順に探す。変換と解析は最初の 1 回だけで、以降はキャッシュを使う
-  (FSDB が更新されたら作り直す)
-- 巨大な FSDB は `FSDB2VCD_CMD` で fsdb2vcd のコマンドラインを変え、fsdb2vcd 側の
+- **FSDB を変換せずにそのまま開ける。** FSDB は Synopsys の非公開フォーマットで、
+  読めるのは Verdi 付属のライブラリだけなので、Verdi がインストールされた
+  サーバで使う。`fsdbsrv.cc` を Verdi の FsdbReader ライブラリ
+  (`$VERDI_HOME/share/FsdbReader` の `ffrAPI.h`, `libnffr`, `libnsys`) で
+  初回に自動ビルドし (`~/.cache/waveview/build/fsdbsrv`)、FST と同じく
+  階層だけ読んで開き、画面に必要な信号・時間範囲だけを読む。Verdi は
+  `$VERDI_HOME`、無ければ PATH の `verdi` / `fsdb2vcd` から探す。
+  別の場所でビルドした fsdbsrv は `WAVEVIEW_FSDBSRV` で指定できる
+- **手元の PC から**: `serve build01:/work/sim/w.fsdb` で、サーバの Verdi で
+  fsdbsrv をビルドしてサーバ側で動かす (FST の `fstsrv` と同じ仕組み、
+  「Windows から」の節を参照)。サーバ側のビルドは `WAVEVIEW_REMOTE_FSDBSRV`
+  で差し替えられる
+- FsdbReader ライブラリが無い (fsdb2vcd だけある) 環境では、従来どおり Verdi の
+  `fsdb2vcd` で VCD に変換して読む (`$FSDB2VCD` → `PATH` → `$VERDI_HOME/bin`
+  の順に探す。変換と解析は最初の 1 回だけで、以降はキャッシュを使う)。
+  巨大な FSDB は `FSDB2VCD_CMD` で fsdb2vcd のコマンドラインを変え、fsdb2vcd 側の
   スコープ・時間範囲の指定で絞れる (既定 `{bin} {in} -o {out}`)
+- 読むのは 0/1/x/z の信号 (1 バイト/ビットで格納されたもの)。real・文字列・
+  トランザクションは出てこない
 - **nWave の保存ファイル (.rc) を読める** (`--rc`)。`addSignal` の信号と基数
   (`-HEX` `-DEC` `-2COMP` `-BIN` `-OCT`)、`cursor` `marker` `zoom` を取り込む。
   階層は末尾一致で探すので、VCS の FSDB (`/tb/u_dut/...`) 用の .rc を
@@ -199,7 +212,8 @@ tools\waveview.cmd serve build01:/work/sim/w.fst --rtl build01:/work/proj/rtl/fi
 - ssh コマンドは `WAVEVIEW_SSH` で差し替えられる (例 `plink -batch`)。
   サーバに C コンパイラか Verilator がなければ、別の場所でビルドした fstsrv を
   `WAVEVIEW_REMOTE_FSTSRV` で指定する
-- リモートは FST のみ。VCD / FSDB はサーバで waveview を動かす従来の方法 (ssh -L) で見る
+- リモートは FST と FSDB (サーバに Verdi があるとき: `fsdbsrv` を同じ手順で
+  サーバ側にビルドする)。VCD はサーバで waveview を動かす従来の方法 (ssh -L) で見る
 
 ## macOS (手元の Mac) から使う
 
@@ -223,7 +237,8 @@ Python も Verilator も C コンパイラも要らない。ダブルクリッ�
 開くので、**Open…** で This Mac か `~/.ssh/config` のホストを選び、Connect
 してダンプを開く。`.fst` / `.vcd` / `.fsdb` をアイコンに落としても (または
 「このアプリケーションで開く」でも) 開ける。Dock にアイコンは出ず、ウィンドウを
-閉じるとプログラムも終わる。FSDB は Verdi の `fsdb2vcd` が別途要る。
+閉じるとプログラムも終わる。手元の FSDB は Verdi の `fsdb2vcd` が別途要る
+(Verdi のあるサーバ上の FSDB はサーバ側で読む)。
 
 - 署名 (公証) はしていないので、初回は右クリック → 開く、または
   `xattr -dr com.apple.quarantine waveview.app`

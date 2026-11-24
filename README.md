@@ -26,8 +26,11 @@ AI agent use together, built for remote development.
   waveform, in a small text file. `serve --rc bug.wvrc` opens exactly that
   view; `load` / `save` from the CLI, right-click to add marks in the browser
   (see `docs/example.wvrc`)
-- Verdi interop: FSDB via Verdi's `fsdb2vcd`, nWave `.rc` in and out; GTKWave
-  `.gtkw` in and out
+- **FSDB without conversion**: where Verdi is installed, `fsdbsrv.cc` reads
+  an FSDB in place through Verdi's FsdbReader library, with the same
+  on-demand protocol as FST, locally or over ssh. Without that library FSDB
+  goes through Verdi's `fsdb2vcd`
+- Verdi interop: nWave `.rc` in and out; GTKWave `.gtkw` in and out
 
 Python 3 standard library only. FST support builds a small C helper on
 demand against the FST library shipped with Verilator (`verilator` on PATH or
@@ -57,14 +60,22 @@ From Windows, with the dump on a Linux build server:
 waveview.cmd serve build01:/work/sim/w.fst --rtl build01:/work/proj/rtl/filelist.f --rtl-root /work/proj --open
 ```
 
+The same with an FSDB, read in place by the server's Verdi (`VERDI_HOME` or
+`fsdb2vcd` on the server's PATH; the first time builds `fsdbsrv` there):
+
+```sh
+python3 waveview.py serve build01:/work/sim/w.fsdb --rtl build01:/work/proj/rtl/filelist.f --rtl-root /work/proj --window
+```
+
 ### Standalone Windows executable
 
 `waveview.exe` needs no Python, Verilator or C compiler. Double-click it and a
 window opens (Edge or Chrome in app mode). In **Open…**, choose This PC or a host
 from `~/.ssh/config`, press Connect, browse to a dump and open it. Closing the
 window ends the program. You can also drop a `.fst` / `.vcd` / `.fsdb` on the exe.
-FSDB still needs Verdi's `fsdb2vcd`. With arguments it is the normal command
-line: `waveview.exe serve w.fst --open`.
+A local FSDB still needs Verdi's `fsdb2vcd`; an FSDB on a server with Verdi is
+read there. With arguments it is the normal command line:
+`waveview.exe serve w.fst --open`.
 
 The window has no terminal for prompts, so ssh must log in without one: use a
 key (with ssh-agent if it has a passphrase) and connect once from a terminal to
@@ -102,8 +113,8 @@ the Verilator 5.040 sources for it. The result is `dist/waveview.app` and
 | `waveview.py` + `waveview_ui/` | viewer server, browser UI, CLI client |
 | `waverc.py` | waveview rc (`.wvrc`): read and write debug views (format in its docstring) |
 | `wavequery.py` | text queries over a dump |
-| `wavesource.py`, `fstsrv.c` | lazy FST reading (local or over ssh) |
-| `remote.py` | ssh transport, remote build of `fstsrv`, remote RTL index |
+| `wavesource.py`, `fstsrv.c`, `fsdbsrv.cc` | lazy FST / FSDB reading (local or over ssh); `fsdbsrv.cc` needs Verdi's FsdbReader |
+| `remote.py` | ssh transport, remote build of `fstsrv` / `fsdbsrv`, remote RTL index |
 | `opener.py` | Open dialog backend: ssh hosts, directory listings, app window |
 | `rtlindex.py` | SystemVerilog index (heuristic, Verilator `--xml-only`, or design JSON) |
 | `wave2img.py`, `fst2vcd_mini.c` | VCD parser; draws a timing diagram to SVG/PNG (needs matplotlib) |
