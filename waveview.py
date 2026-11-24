@@ -74,6 +74,7 @@ import remote  # noqa: E402
 import rtlindex  # noqa: E402
 import waverc  # noqa: E402
 import opener  # noqa: E402
+import ifaces  # noqa: E402
 
 UI_DIR = os.path.join(HERE, "waveview_ui")
 DEFAULT_PORT = 8765
@@ -872,6 +873,130 @@ class Hub:
         v["parent"] = up[0] if up else None
         return v
 
+    def diagram(self, scope):
+        """A block diagram of a scope: its child instances as boxes with
+        their size (signals, instances, lines) and interface bundles, the
+        scope's own ports as bundles, and, with a source index, the
+        connections between the boxes grouped by bundle with the protocol
+        told from the names (ifaces.py)."""
+        scope = (scope or "").strip(".")
+        pre = scope + "." if scope else ""
+        kids = {}  # child -> {"signals", "sub", "own"}
+        own = []   # (leaf, width, direction) of the signals directly in scope
+        widths = {}
+        for s in self.wave.signals:
+            if not s.name.startswith(pre):
+                continue
+            rest = s.name[len(pre):]
+            comps = rest.split(".")
+            widths[rest] = s.width
+            if len(comps) == 1:
+                own.append((comps[0], s.width, s.direction))
+                continue
+            d = kids.setdefault(comps[0], {"signals": 0, "sub": set(), "own": []})
+            d["signals"] += 1
+            if len(comps) > 2:
+                d["sub"].add(comps[1])
+            else:
+                d["own"].append((comps[1], s.width, s.direction))
+        idx = self.src
+        mod = None
+        if idx is not None and scope:
+            mod, rest = idx.resolve_scope(scope)
+            if rest:
+                mod = None
+        boxes = {}
+
+        def box(name):
+            if name in boxes:
+                return boxes[name]
+            d = kids.get(name)
+            b = {"name": name, "scope": pre + name, "module": None, "signals": d["signals"] if d else 0,
+                 "insts": len(d["sub"]) if d else 0, "loc": None, "in_dump": d is not None, "bundles": [],
+                 "ports": {}}
+            if idx is not None:
+                cm, crest = idx.resolve_scope(pre + name)
+                if cm is not None and not crest:
+                    b["module"] = cm.orig
+                    b["loc"] = cm.end_line - cm.line + 1
+                    b["insts"] = max(b["insts"], len(cm.instances))
+                    b["ports"] = {p: cm.port_dir.get(p, "inout") for p in cm.ports}
+            boxes[name] = b
+            return b
+
+        for name in kids:
+            box(name)
+        if mod is not None:
+            for name in mod.instances:
+                box(name)
+        # each box's interfaces: its ports (index) or its port-like dump signals
+        for b in boxes.values():
+            d = kids.get(b["name"])
+            if b["ports"]:
+                plist = [(p, widths.get(b["name"] + "." + p, 1), dr) for p, dr in b["ports"].items()]
+            else:
+                plist = [(n, w, dr) for n, w, dr in (d["own"] if d else []) if dr] or (d["own"] if d else [])
+            b["bundles"] = ifaces.bundles(plist)
+            b.pop("ports")
+        # the scope's own ports
+        if mod is not None:
+            plist = [(p, widths.get(p, 1), mod.port_dir.get(p, "inout")) for p in mod.ports]
+        else:
+            plist = [(n, w, dr) for n, w, dr in own if dr]
+        ports = ifaces.bundles(plist)
+        # connections: nets of the module, who drives and who reads them
+        edges = {}
+        if mod is not None:
+            bundle_of = {}  # (box, port) -> bundle
+            for b in boxes.values():
+                for bd in b["bundles"]:
+                    for sname in bd["signals"]:
+                        bundle_of[(b["name"], sname)] = bd
+            for bd in ports:
+                for sname in bd["signals"]:
+                    bundle_of[("", sname)] = bd
+            nets = {}
+            for p in mod.ports:
+                # inside the module an input port is a source, an output a sink
+                flipped = {"input": "output", "output": "input"}.get(mod.port_dir.get(p, "inout"), "inout")
+                nets.setdefault(p, []).append(("", p, flipped))
+            for iname, inst in mod.instances.items():
+                im = idx.modules.get(inst.mtype)
+                for k, (port, toks, _ln, _col) in enumerate(inst.conns):
+                    pname = port if port is not None else (im.ports[k] if im and k < len(im.ports) else None)
+                    if pname is None:
+                        continue
+                    net = None
+                    depth = 0
+                    for t in toks:
+                        if t.kind == "op":
+                            depth += 1 if t.text == "[" else -1
+                        elif t.kind == "id" and depth == 0 and net is None:
+                            net = t.text
+                    if net is None:
+                        continue
+                    pdir = im.port_dir.get(pname, "inout") if im else "inout"
+                    nets.setdefault(net, []).append((iname, pname, pdir))
+            for net, ends in nets.items():
+                drivers = [e for e in ends if e[2] == "output"]
+                sinks = [e for e in ends if e[2] == "input"]
+                if not drivers:  # inout or unknown direction: pair everything with the first
+                    drivers, sinks = ends[:1], ends[1:]
+                for di, dp, _ in drivers:
+                    for si, sp, _ in sinks:
+                        if di == si:
+                            continue
+                        bd = bundle_of.get((di, dp))
+                        key = (di, si, bd["name"] if bd else dp)
+                        e = edges.setdefault(key, {"from": di, "to": si, "bundle": bd["name"] if bd else dp,
+                                                   "protocol": bd["protocol"] if bd else None,
+                                                   "role": bd["role"] if bd else None, "width": 0, "nets": []})
+                        e["width"] += widths.get(net, widths.get(di + "." + dp, 1))
+                        e["nets"].append([dp, net, sp])
+        return {"scope": scope, "module": mod.orig if mod else None, "index": idx is not None,
+                "boxes": sorted(boxes.values(), key=lambda b: (-b["signals"], b["name"])),
+                "ports": ports, "edges": list(edges.values())}
+
     def src_where(self, scope):
         """For a node of the hierarchy: the module that implements it (file
         and line) and, when it is an instance, where the parent module
@@ -1218,6 +1343,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if path == "/api/src/where":
                 with hub.lock:
                     return self._send(200, hub.src_where(query["scope"][0]))
+            if path == "/api/diagram":
+                with hub.lock:
+                    return self._send(200, hub.diagram(query.get("scope", [""])[0]))
             if path == "/api/src/status":
                 return self._send(200, {"status": hub.src_status, "ready": hub.src is not None})
             if path == "/api/src/trace":
@@ -1630,6 +1758,37 @@ def print_snapshot(snap, radix="hex"):
             print("  " + line)
 
 
+def print_diagram(d):
+    """The block diagram as text, for a terminal or an agent."""
+
+    def bundle_text(b):
+        tag = b["protocol"] or "?"
+        if b["role"]:
+            tag += " " + b["role"]
+        name = b["name"] if not (b["protocol"] and b["name"].lower() == b["protocol"].lower()) else ""
+        return "%s[%s, %d bits, %d signals%s]" % (name + " " if name else "", tag, b["width"], len(b["signals"]),
+                                                  ", " + b["dir"] if b["dir"] else "")
+
+    print("scope   %s%s" % (d["scope"] or "(top)", "  (%s)" % d["module"] if d["module"] else ""))
+    if not d["index"]:
+        print("        no source index: boxes from the dump only, no connections")
+    if d["ports"]:
+        print("ports   " + "; ".join(bundle_text(b) for b in d["ports"]))
+    for b in d["boxes"]:
+        size = "%d signals, %d insts" % (b["signals"], b["insts"]) + (", %d lines" % b["loc"] if b["loc"] else "")
+        print("box     %-24s %s%s  %s" % (b["name"], "(%s) " % b["module"] if b["module"] else "", size,
+                                         "" if b["in_dump"] else "[not in the dump]"))
+        for bd in b["bundles"]:
+            if bd["protocol"] not in (None, "clock", "reset") or len(bd["signals"]) > 2:
+                print("          %s" % bundle_text(bd))
+    for e in sorted(d["edges"], key=lambda e: -e["width"]):
+        tag = e["protocol"] or "?"
+        if e["role"]:
+            tag += " " + e["role"]
+        print("edge    %s -> %s  %s [%s, %d bits, %d nets]" % (e["from"] or "(ports)", e["to"] or "(ports)",
+                                                            e["bundle"], tag, e["width"], len(e["nets"])))
+
+
 def _full_name(c, name):
     names = [row[0] for row in c.call("/api/signals")]
     if name in names:
@@ -1767,6 +1926,12 @@ def run_client(args):
             print("message #%d from the viewer: %s" % (m["id"], m["text"]))
             print("view when it was sent:")
             print_snapshot(m["context"])
+    elif args.cmd == "diagram":
+        d = c.call("/api/diagram?scope=" + urllib.parse.quote(args.scope))
+        if j:
+            print(json.dumps(d))
+            return 0
+        print_diagram(d)
     elif args.cmd == "src":
         name = args.signal
         info = c.call("/api/src/signal?name=" + urllib.parse.quote(_full_name(c, name)))
@@ -1916,6 +2081,15 @@ def run_selftest():
           where["module"] == "leaf" and where["line"] >= 1 and where["parent"] == "TOP.top"
           and where["instance"] == "u_leaf" and where["inst_line"] > where["line"])
     check("source: where of the top", "parent" not in hub2.src_where("TOP.top"))
+    dg = hub2.diagram("TOP.top")
+    names = {b["name"]: b for b in dg["boxes"]}
+    check("diagram: instances as boxes with their size",
+          dg["module"] == "top" and "u_leaf" in names and names["u_leaf"]["module"] == "leaf"
+          and names["u_leaf"]["loc"] > 5 and names["u_leaf"]["signals"] > 0)
+    check("diagram: the scope's ports and connections through nets",
+          any(b["signals"] == ["clk"] for b in dg["ports"])
+          and any(e["from"] == "" and e["to"] == "u_leaf" for e in dg["edges"]))
+    check("diagram: the top without an index", hub2.diagram("")["boxes"][0]["name"] == "TOP")
     # a filelist without the testbench: the DUT's scope is named after no module
     vcd_tb = os.path.join(tmp, "tb.vcd")
     with open(vcd_tb, "w") as fh:
@@ -2221,6 +2395,10 @@ def build_parser():
     s.add_argument("--loads", action="store_true", help="show the readers instead of the drivers")
     s.add_argument("--context", type=int, default=0, help="lines of source around each place")
     s.add_argument("--open", action="store_true", help="also show it in the viewer's source pane")
+    s = sub.add_parser("diagram", parents=[client],
+                       help="block diagram of a scope as text: instances with their size and interfaces "
+                            "(AXI, APB, CHI... told from the names), and the connections between them")
+    s.add_argument("scope", nargs="?", default="", help="dump scope (default: the top)")
     return p
 
 

@@ -108,6 +108,22 @@ When asked for a debug view of a failure without a viewer running, write the
 .wvrc by hand (dump line relative to the file) and check it with
 `waveview.py serve --rc FILE` (warnings name lines that did not apply).
 
+## The shape of a scope: block diagram
+
+```sh
+waveview.py diagram u_soc              # instances with their size and interfaces, and who connects to whom
+waveview.py diagram u_soc --json       # the same for a program
+```
+
+Each box is an instance (signals, sub-instances, lines of source), its
+interfaces are bundles of signals with the protocol told from the names (AXI4
+master, APB completer, AXI4-Stream source, CHI requester...), and the edges
+say which instance drives which through what bundle. Bundles tagged `?` are
+the ones the names did not identify: say what they are to the user when you
+can tell from the signals or the source. The user sees the same picture with
+the Diagram button (D); a connection clicked there adds its signals to the
+waveform.
+
 ## From a waveform value to the RTL that made it
 
 ```sh

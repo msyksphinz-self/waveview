@@ -539,6 +539,184 @@ async function treeMenu(e, k) {
   showMenu(e.clientX, e.clientY, items);
 }
 
+// ---------------------------------------------------------------------------
+// Block diagram of a scope: boxes for instances (sized by what they hold),
+// their interface bundles, and the connections between them (/api/diagram)
+// ---------------------------------------------------------------------------
+
+const DG = { scope: null, data: null };
+const PROTO_COLOR = {
+  'AXI4': '#4ea1ff', 'AXI4-Lite': '#7cc0ff', 'AXI4-Stream': '#2fbfa8', 'APB': '#4cb944', 'AHB': '#9bb43a',
+  'CHI': '#a86ee8', 'TileLink': '#f0932b', 'Wishbone': '#b5651d', 'Avalon-MM': '#e06ca8',
+  'valid/ready': '#7f8fa6', 'req/ack': '#8d99ae', 'clock': '#666', 'reset': '#666',
+};
+function protoColor(p) { return PROTO_COLOR[p] || '#8b929c'; }
+
+async function showDiagram(scope) {
+  if (scope === undefined || scope === null) scope = S.scope || '';
+  let d;
+  try { d = await api('/api/diagram?scope=' + encodeURIComponent(scope)); } catch (e) { toast(e.message); return; }
+  DG.scope = d.scope; DG.data = d;
+  renderDiagram(d);
+  // not modal: the context menu and the toasts live outside the dialog
+  if (!$('diagdlg').open) $('diagdlg').show();
+}
+
+function renderDiagram(d) {
+  const svg = $('dg-svg');
+  svg.textContent = '';
+  // crumbs
+  const crumbs = $('dg-crumbs');
+  crumbs.textContent = '';
+  const comps = d.scope ? d.scope.split('.') : [];
+  const top = document.createElement('a'); top.textContent = '(top)'; top.onclick = () => showDiagram('');
+  crumbs.append(top);
+  comps.forEach((c, i) => {
+    crumbs.append(' . ');
+    const a = document.createElement('a'); a.textContent = c;
+    const sc = comps.slice(0, i + 1).join('.');
+    a.onclick = () => showDiagram(sc);
+    crumbs.append(a);
+  });
+  if (d.module) { const m = document.createElement('span'); m.className = 'mod'; m.textContent = '(' + d.module + ')'; crumbs.append(m); }
+  $('dg-up').disabled = !d.scope;
+  $('dg-msg').textContent = d.index ? `${d.boxes.length} instances · ${d.edges.length} connections` : `${d.boxes.length} scopes · no source index, so no connections (start with --rtl or choose the RTL in Open…)`;
+
+  // nodes: the boxes, plus the scope's own ports as an entry and an exit node
+  const nodes = new Map();
+  const inB = d.ports.filter((b) => b.dir !== 'out');
+  const outB = d.ports.filter((b) => b.dir === 'out');
+  if (d.ports.length) {
+    nodes.set('', { name: '', kind: 'port', in: [], out: inB, label: d.scope ? 'ports in' : '', rank: 0 });
+    nodes.set('\u0000out', { name: '\u0000out', kind: 'port', in: outB, out: [], label: 'ports out', rank: null });
+  }
+  for (const b of d.boxes) {
+    const left = b.bundles.filter((x) => x.dir === 'in' || x.dir === 'mixed' || !x.dir);
+    const right = b.bundles.filter((x) => x.dir === 'out');
+    nodes.set(b.name, { name: b.name, kind: b.in_dump ? 'box' : 'ghost', box: b, in: left, out: right, rank: null });
+  }
+  const edges = d.edges.map((e) => ({ ...e, to: e.to === '' ? '\u0000out' : e.to }));
+  const RESPONSE = new Set(['slave', 'sink', 'completer', 'manager', 'agent', 'responder']);
+  const isPlumbing = (e) => e.protocol === 'clock' || e.protocol === 'reset';
+  // ranks: longest path from the sources along the request direction (a
+  // slave's response edge and the clock / reset fan-out do not place a box)
+  const preds = new Map([...nodes.keys()].map((k) => [k, []]));
+  for (const e of edges) {
+    if (!nodes.has(e.from) || !nodes.has(e.to) || e.from === e.to || isPlumbing(e) || RESPONSE.has(e.role)) continue;
+    preds.get(e.to).push(e.from);
+  }
+  const state = new Map();
+  const rankOf = (k) => {
+    const n = nodes.get(k);
+    if (n.rank !== null) return n.rank;
+    if (state.get(k) === 1) return 1;  // a cycle: stop here
+    state.set(k, 1);
+    let r = 1;
+    for (const p of preds.get(k)) r = Math.max(r, rankOf(p) + 1);
+    n.rank = r; state.set(k, 2);
+    return r;
+  };
+  for (const k of nodes.keys()) if (k !== '\u0000out') rankOf(k);
+  let maxRank = 1;
+  for (const n of nodes.values()) if (n.name !== '\u0000out' && n.rank > maxRank) maxRank = n.rank;
+  if (nodes.has('\u0000out')) nodes.get('\u0000out').rank = maxRank + 1;
+  // sizes
+  for (const n of nodes.values()) {
+    const rows = Math.max(1, n.in.length, n.out.length);
+    const sig = n.box ? n.box.signals : 0;
+    n.w = n.kind === 'port' ? 150 : 200;
+    n.h = Math.max(44, 38 + 13 * rows + (n.kind === 'port' ? 0 : 20)) + (sig ? Math.min(60, 7 * Math.log2(1 + sig)) : 0);
+  }
+  // columns, ordered by the barycentre of the predecessors
+  const cols = [];
+  for (const n of nodes.values()) (cols[n.rank] = cols[n.rank] || []).push(n);
+  const yOf = new Map();
+  cols.forEach((col, r) => {
+    if (r > 0) col.sort((a, b) => {
+      const bc = (n) => { const ps = preds.get(n.name).map((p) => yOf.get(p)).filter((v) => v !== undefined); return ps.length ? ps.reduce((s, v) => s + v, 0) / ps.length : 1e9; };
+      return bc(a) - bc(b) || (b.box ? b.box.signals : 0) - (a.box ? a.box.signals : 0);
+    });
+    let y = 24;
+    for (const n of col) { n.y = y; yOf.set(n.name, y + n.h / 2); y += n.h + 22; }
+  });
+  const colX = [];
+  let x = 24;
+  cols.forEach((col, r) => { colX[r] = x; if (col) x += Math.max(...col.map((n) => n.w)) + 190; });
+  for (const n of nodes.values()) n.x = colX[n.rank];
+  const W = x + 24, H = Math.max(200, ...[...nodes.values()].map((n) => n.y + n.h + 24));
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svg.setAttribute('width', W); svg.setAttribute('height', H);
+  const NS = 'http://www.w3.org/2000/svg';
+  const el = (tag, attrs, parent) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); (parent || svg).appendChild(e); return e; };
+  const text = (parent, x, y, s, cls, anchor) => { const t = el('text', { x, y, class: cls || '', 'text-anchor': anchor || 'start' }, parent); t.textContent = s; return t; };
+  const stubY = (n, side, bundle) => { const list = side === 'in' ? n.in : n.out; const i = Math.max(0, list.indexOf(bundle)); return n.y + 38 + (n.kind === 'port' ? 0 : 14) + i * 13; };
+  const bundleOf = (n, side, name) => (side === 'in' ? n.in : n.out).find((b) => b.name === name);
+  // edges first, under the boxes; labels of the edges between the same two
+  // boxes are spread along the way so that they do not pile up
+  const pairSeen = new Map();
+  for (const e of edges) {
+    const a = nodes.get(e.from), b = nodes.get(e.to);
+    if (!a || !b) continue;
+    const fb = bundleOf(a, 'out', e.bundle) || a.out[0], tb = b.in.find((x) => e.nets.some((nt) => x.signals.includes(nt[2]))) || b.in[0];
+    const x1 = a.x + a.w, y1 = fb ? stubY(a, 'out', fb) : a.y + a.h / 2;
+    const x2 = b.x, y2 = tb ? stubY(b, 'in', tb) : b.y + b.h / 2;
+    const g = el('g', { class: 'edge' + (isPlumbing(e) ? ' plumbing' : '') });
+    const sw = isPlumbing(e) ? 1 : 1 + Math.min(5, Math.log2(1 + e.width) / 2);
+    const mx = (x1 + x2) / 2;
+    el('path', { d: `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`, stroke: protoColor(e.protocol), 'stroke-width': sw.toFixed(1) }, g);
+    if (!isPlumbing(e)) {
+      const pk = [a.name, b.name].sort().join('\u0001');
+      const k = pairSeen.get(pk) || 0;
+      pairSeen.set(pk, k + 1);
+      const t = 0.5 + (k % 3 - 1) * 0.2;  // 0.3, 0.5, 0.7 along the edge, and a line lower each time
+      const lx = x1 + (x2 - x1) * t, ly = y1 + (y2 - y1) * t - 4 + k * 13;
+      const label = (e.protocol || e.bundle) + (e.role ? ' ' + e.role : '') + ` ${e.width}b`;
+      text(g, lx, ly, label, '', 'middle');
+    }
+    g.addEventListener('click', () => {
+      const pre = d.scope ? d.scope + '.' : '';
+      const names = e.nets.map((nt) => (e.from ? pre + e.from + '.' + nt[0] : pre + nt[1])).filter((n) => S.width.has(n));
+      if (!names.length) { toast('none of these signals is in the dump'); return; }
+      addRows(names);
+      toast(`added ${names.length} signals of ${e.bundle}`);
+    });
+    const title = el('title', {}, g);
+    title.textContent = e.nets.map((nt) => `${e.from || '(ports)'}.${nt[0]}  →  ${nt[1]}  →  ${e.to === '\u0000out' ? '(ports)' : e.to}.${nt[2]}`).join('\n');
+  }
+  // boxes
+  for (const n of nodes.values()) {
+    const g = el('g', { class: 'box ' + n.kind + (n.box && n.box.scope === S.scope ? ' on' : ''), transform: `translate(${n.x},${n.y})` });
+    el('rect', { width: n.w, height: n.h }, g);
+    if (n.kind === 'port') {
+      text(g, n.w / 2, 18, n.label, 'name', 'middle');
+      n.in.forEach((b, i) => text(g, 8, 38 + i * 13, bundleLabel(b), 'stub' + (b.protocol ? ' proto' : '')));
+      n.out.forEach((b, i) => text(g, n.w - 8, 38 + i * 13, bundleLabel(b), 'stub' + (b.protocol ? ' proto' : ''), 'end'));
+    } else {
+      const b = n.box;
+      text(g, 10, 18, b.name, 'name');
+      text(g, 10, 32, (b.module ? b.module + '  ·  ' : '') + `${b.signals} sig · ${b.insts} inst` + (b.loc ? ` · ${b.loc} lines` : '') + (b.in_dump ? '' : ' · not dumped'), 'dim');
+      n.in.forEach((x, i) => text(g, 8, 52 + i * 13, '▸ ' + bundleLabel(x), 'stub' + (x.protocol ? ' proto' : '')));
+      n.out.forEach((x, i) => text(g, n.w - 8, 52 + i * 13, bundleLabel(x) + ' ▸', 'stub' + (x.protocol ? ' proto' : ''), 'end'));
+      g.addEventListener('click', () => { S.scope = b.scope; S.pick.clear(); renderTree(); renderSigList(); for (const o of svg.querySelectorAll('.box.on')) o.classList.remove('on'); g.classList.add('on'); });
+      g.addEventListener('dblclick', () => showDiagram(b.scope));
+      g.addEventListener('contextmenu', (e) => treeMenu(e, { path: b.scope, name: b.name }));
+      const title = el('title', {}, g);
+      title.textContent = b.scope + '\n' + b.bundles.map((x) => bundleLabel(x) + ': ' + x.signals.join(', ')).join('\n');
+    }
+  }
+}
+
+function bundleLabel(b) {
+  const tag = b.protocol && b.protocol !== 'clock' && b.protocol !== 'reset' ? `${b.protocol}${b.role ? ' ' + b.role : ''}` : '';
+  const name = tag && b.name.toLowerCase() === b.protocol.toLowerCase() ? '' : b.name;  // "apb APB" says it once
+  return [name, tag, `${b.width}b`].filter(Boolean).join(' ');
+}
+
+$('b-diag').onclick = () => showDiagram();
+$('dg-close').onclick = () => $('diagdlg').close();
+$('diagdlg').addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); $('diagdlg').close(); } });
+$('dg-up').onclick = () => { if (DG.scope) showDiagram(DG.scope.split('.').slice(0, -1).join('.')); };
+
 function globRe(p) {
   return new RegExp('^' + p.split('').map((c) => (c === '*' ? '.*' : c === '?' ? '.' : c.replace(/[.+^${}()|[\]\\]/g, '\\$&'))).join('') + '$', 'i');
 }
@@ -1325,6 +1503,7 @@ document.addEventListener('keydown', (e) => {
     case '/': e.preventDefault(); $('find').focus(); break;
     case 'a': openAsk(); break;
     case 'S': $('b-src').click(); break;
+    case 'D': $('b-diag').click(); break;
     case '?': $('helpdlg').showModal(); break;
     default: return;
   }
@@ -1423,6 +1602,7 @@ async function srcView(scope) {
 
 async function srcOpen(scope, line, opts) {
   opts = opts || {};
+  if ($('diagdlg').open) $('diagdlg').close();  // the source pane is behind the diagram
   let v;
   try { v = await srcView(scope); } catch (e) { toast(e.message); return false; }
   const same = SRC.view === v;
@@ -1948,4 +2128,7 @@ $('opendlg').addEventListener('cancel', (e) => { if (!OP.hasDump) e.preventDefau
   if (!session.dump) { setPill('st-conn', 'no waveform open', ''); showOpen(); return; }
   await loadSignals();
   connect();
+  // a deep link: #diagram or #diagram=scope opens the block diagram at once
+  const m = /^#diagram(?:=(.*))?$/.exec(location.hash);
+  if (m) showDiagram(m[1] ? decodeURIComponent(m[1]) : (S.scope || ''));
 })();

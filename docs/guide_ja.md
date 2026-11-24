@@ -303,6 +303,28 @@ Python も Verilator も C コンパイラも要らない。ダブルクリッ�
 同じ一覧からファイルリスト (.f / .vc / .flist) や design JSON / Verilator XML を
 選ぶか、**Use this folder** でフォルダ自体を指定できる。
 
+## ブロック図: スコープの中身と接続
+
+ツールバーの **Diagram** (`D`) で、選択中のスコープのブロック図を開く。
+
+- 箱は子インスタンス。モジュール名、配下の信号数・インスタンス数・ソース行数を
+  表示し、大きさも配下の信号数で変える。ダンプに無いインスタンス (索引にだけある)
+  は点線
+- 各箱の左右にインターフェースの束 (バンドル) を出す。信号名の接尾語から
+  AXI4 / AXI4-Lite / AXI4-Stream、APB、AHB、CHI、TileLink、Wishbone、Avalon-MM、
+  汎用の valid/ready・req/ack、clock / reset を判定し、方向が分かれば
+  master / slave (source / sink、requester / completer) も付ける。判定は名前の
+  規則だけで決定的に行う (ifaces.py)。合わなかった信号は先頭の単語でまとめる
+- 箱同士の線はソース索引のネット接続から引く (束ごとに 1 本、太さはビット幅、
+  色はプロトコル)。索引が無ければ箱と束だけが出る。clock / reset は細い点線
+- 配置は要求の向き (master → slave) で左から右へ。左端がスコープの入力ポート、
+  右端が出力ポート
+- 箱クリックでそのスコープを選択、ダブルクリックで中へ、右クリックでモジュール
+  定義 / インスタンス化箇所へ (ソースペイン)。線をクリックするとその束の信号を
+  波形に追加。`#diagram=<scope>` を URL に付けると起動時に開く
+- AI からは `waveview.py diagram <scope>` (または `--json`) で同じ内容を文字で読める。
+  名前から判定できなかった束 (`?`) に AI が名前を付ける、というのが次の段階
+
 ## ソース表示: Active Annotation とドライバの追跡 (Verdi nTrace 風)
 
 ```sh

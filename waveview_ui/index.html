@@ -23,6 +23,7 @@
   <span class="sep"></span>
   <input id="find" spellcheck="false" placeholder="Search: commit_valid &amp;&amp; pc == 0x80000040  (Enter next · Shift+Enter prev)">
   <button id="b-src" title="Source view with active annotation (S). Double-click a signal to trace its drivers">Source</button>
+  <button id="b-diag" title="Block diagram of the selected scope: instances, their size, interfaces (AXI, APB, CHI…) and connections (D)">Diagram</button>
   <button id="b-ask" class="primary" title="Send the current view and a message to the AI agent">Send to AI</button>
   <a id="b-gtkw" class="btn" href="/api/export.gtkw" title="Save the signal list as a GTKWave save file">.gtkw</a>
   <a id="b-rc" class="btn" href="/api/export.rc" title="Save the signal list, cursor and zoom as a Verdi nWave save file">.rc</a>
@@ -110,6 +111,18 @@
   <div class="dlgbtns"><button id="op-cancel">Cancel</button><button id="op-open" class="primary" disabled>Open</button></div>
 </dialog>
 
+<dialog id="diagdlg">
+  <div id="dg-head">
+    <button id="dg-up" title="Parent scope">↑</button>
+    <span id="dg-crumbs"></span>
+    <span id="dg-msg" class="dim"></span>
+    <span class="grow"></span>
+    <button id="dg-close" title="Close (Esc)">×</button>
+  </div>
+  <div id="dg-box"><svg id="dg-svg" xmlns="http://www.w3.org/2000/svg"></svg></div>
+  <div id="dg-foot" class="dim">Click a box: select its scope · double-click: go inside · right-click: its source · click a connection: add its signals to the waveform</div>
+</dialog>
+
 <dialog id="helpdlg">
   <form method="dialog">
     <h3>Mouse and keys</h3>
@@ -125,7 +138,7 @@
       <tr><th>h d s b o</th><td>Radix hex/dec/signed/bin/oct</td><th>/ or Ctrl+F</th><td>Search</td></tr>
       <tr><th>a</th><td>Send to AI</td><th>Esc</th><td>Clear selection, close menus</td></tr>
       <tr><th>Double-click row</th><td>Trace drivers in the source</td><th>S</th><td>Show / hide the source pane</td></tr>
-      <tr><th>Right-click tree node</th><td>Open its module, or where the parent instantiates it</td><th></th><td></td></tr>
+      <tr><th>Right-click tree node</th><td>Open its module, or where the parent instantiates it</td><th>D</th><td>Block diagram of the selected scope</td></tr>
       <tr><th>Source: double-click</th><td>Drivers (Shift: loads); instance: go in</td><th>Source: Ctrl+click</th><td>Add the signal to the waveform</td></tr>
       <tr><th>Alt+← / →</th><td>Source history back / forward</td><th>[ / ]</th><td>Previous / next named cursor</td></tr>
       <tr><th>Right-click wave</th><td>Named cursor, comment, arrow here; edit / remove one</td><th>Load rc / .wvrc</th><td>Open / save a debug view file</td></tr>

@@ -10,6 +10,12 @@ AI agent use together, built for remote development.
   (`waveview.py add / goto / marker / annotate / note / find / look / src`)
   drives the same screen the person sees, and "Send to AI" hands the agent a
   message plus the current view
+- **Block diagram of a scope**: instances as boxes sized by what they hold,
+  their interfaces bundled with the protocol told from the signal names
+  (AXI4 / AXI4-Lite / AXI4-Stream, APB, AHB, CHI, TileLink, Wishbone,
+  Avalon, valid/ready), and the connections between them from the source
+  index; click a box to select it, a connection to add its signals. The same
+  as text for an agent: `waveview.py diagram <scope>`
 - **Source pane, Verdi nTrace style**: active annotation (values at the
   cursor next to every signal), double-click to trace drivers / loads across
   the hierarchy, into instances and up through ports; right-click a node of
@@ -138,6 +144,7 @@ the Verilator 5.040 sources for it. The result is `dist/waveview.app` and
 | `remote.py` | ssh transport, remote build of `fstsrv` / `fsdbsrv`, remote RTL index |
 | `opener.py` | Open dialog backend: ssh hosts, directory listings, app window |
 | `rtlindex.py` | SystemVerilog index (heuristic, Verilator `--xml-only`, design JSON, or a Verdi KDB through `npi_export.py`) |
+| `ifaces.py` | interface bundles: signals grouped into buses, protocol and role told from the names |
 | `npi_export.py` | Verdi KDB (`work.lib++`, `simv.daidir`) to design JSON, through Verdi's Python NPI |
 | `wave2img.py`, `fst2vcd_mini.c` | VCD parser; draws a timing diagram to SVG/PNG (needs matplotlib) |
 | `build_windows.sh` | builds the standalone `dist/waveview.exe` |
