@@ -206,11 +206,31 @@ class Export:
             self.files.add(f)
             m["decls"][n] = [self.rel(f), ln, self.col_of(f, ln, n), kind]
 
+        m["kind"] = "interface" if _type(scope) == "npiInterface" else "module"
+        m["ifports"] = {}
+        m["modports"] = {}
         for p in _try(scope, "port_handles") or []:
             d = _try(p, "direction") or ""
             d = {"npiInput": "input", "npiOutput": "output", "npiInout": "inout"}.get(d, "inout")
             m["ports"].append([_name(p), d])
             decl(p, "port")
+            # an interface port: what it is wired to is an interface instance
+            lc = _try(p, "low_conn_handle")
+            hc = _try(p, "high_conn_handle")
+            for h in (lc, hc):
+                if h is not None and _type(h) in ("npiInterface", "npiModport", "npiInterfaceArray"):
+                    iface = _try(h, "def_name") or _try(_try(h, "parent_handle"), "def_name")
+                    mp = _try(h, "modport_handle") if _type(h) != "npiModport" else h
+                    if iface:
+                        m["ifports"][_name(p)] = [iface, _name(mp) if mp is not None else None]
+                    break
+        for mp in _try(scope, "modport_handles") or []:
+            dirs = {}
+            for mpp in _try(mp, "mp_port_handles") or _try(mp, "port_handles") or []:
+                d = _try(mpp, "direction") or ""
+                dirs[_name(mpp)] = {"npiInput": "input", "npiOutput": "output", "npiInout": "inout"}.get(d, "inout")
+            if dirs:
+                m["modports"][_name(mp)] = dirs
         for p in _try(scope, "parameter_handles") or []:
             m["params"].append(_name(p).split(".")[-1])
             decl(p, "param")
@@ -297,7 +317,9 @@ class Export:
         for s in _try(scope, "internal_scope_handles") or []:
             t = _type(s)
             n = _name(s).split(".")[-1]
-            if t == "npiModule":
+            if t == "npiModport":
+                continue  # a view of the interface, not a scope of its own
+            if t in ("npiModule", "npiInterface", "npiProgram"):
                 base = re.sub(r"\[.*\]$", "", n)
                 if base not in m["instances"]:
                     f = _try(s, "file") or ""

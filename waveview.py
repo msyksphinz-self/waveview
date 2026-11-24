@@ -922,14 +922,21 @@ class Hub:
             d = kids.get(name)
             b = {"name": name, "scope": pre + name, "module": None, "signals": d["signals"] if d else 0,
                  "insts": len(d["sub"]) if d else 0, "loc": None, "in_dump": d is not None, "bundles": [],
-                 "ports": {}}
+                 "ports": {}, "iface": False}
             if idx is not None:
                 cm, crest = idx.resolve_scope(pre + name)
                 if cm is not None and not crest:
                     b["module"] = cm.orig
                     b["loc"] = cm.end_line - cm.line + 1
                     b["insts"] = max(b["insts"], len(cm.instances))
-                    b["ports"] = {p: cm.port_dir.get(p, "inout") for p in cm.ports}
+                    if cm.kind == "interface":
+                        # an interface instance: what it carries, not ports
+                        b["iface"] = True
+                        b["ports"] = {n: "" for n in cm.decls if n not in cm.params}
+                    else:
+                        b["ports"] = {p: cm.port_dir.get(p, "inout") for p in cm.ports if p not in cm.port_iface}
+                        for p, (iface, modport) in cm.port_iface.items():
+                            b["ports"][p] = idx.iface_port_dir(iface, modport) or "inout"
             boxes[name] = b
             return b
 
@@ -941,18 +948,33 @@ class Hub:
         # each box's interfaces: its ports (index) or its port-like dump signals
         for b in boxes.values():
             d = kids.get(b["name"])
+            extra = []
             if b["ports"]:
-                plist = [(p, widths.get(b["name"] + "." + p, 1), dr) for p, dr in b["ports"].items()]
+                cm = idx.resolve_scope(b["scope"])[0] if idx is not None else None
+                ifp = cm.port_iface if cm is not None else {}
+                plist = [(p, widths.get(b["name"] + "." + p, 1), dr) for p, dr in b["ports"].items() if p not in ifp]
+                for p, (iface, modport) in ifp.items():
+                    # the interface instance it is wired to, if the dump has one, gives the widths
+                    ibox = next((n for n, x in boxes.items() if x["iface"] and x["module"] == iface), None)
+                    bd = self._iface_bundle(idx, iface, modport, p, widths, ibox or "")
+                    if bd:
+                        extra.append(bd)
             else:
                 plist = [(n, w, dr) for n, w, dr in (d["own"] if d else []) if dr] or (d["own"] if d else [])
-            b["bundles"] = ifaces.bundles(plist)
+            b["bundles"] = extra + ifaces.bundles(plist)
             b.pop("ports")
-        # the scope's own ports
+        # the scope's own ports; an interface port is one bundle, with the
+        # protocol of the interface's signals and the modport's view of it
         if mod is not None:
-            plist = [(p, widths.get(p, 1), mod.port_dir.get(p, "inout")) for p in mod.ports]
+            plist = [(p, widths.get(p, 1), mod.port_dir.get(p, "inout")) for p in mod.ports if p not in mod.port_iface]
         else:
             plist = [(n, w, dr) for n, w, dr in own if dr]
         ports = ifaces.bundles(plist)
+        if mod is not None:
+            for p, (iface, modport) in mod.port_iface.items():
+                bd = self._iface_bundle(idx, iface, modport, p, widths, p)
+                if bd:
+                    ports.insert(0, bd)
         # connections: nets of the module, who drives and who reads them
         edges = {}
         if mod is not None:
@@ -965,7 +987,10 @@ class Hub:
                 for sname in bd["signals"]:
                     bundle_of[("", sname)] = bd
             nets = {}
+            iface_links = []  # (instance, port, interface instance or "" for the scope's port, iface, modport)
             for p in mod.ports:
+                if p in mod.port_iface:
+                    continue
                 # inside the module an input port is a source, an output a sink
                 flipped = {"input": "output", "output": "input"}.get(mod.port_dir.get(p, "inout"), "inout")
                 nets.setdefault(p, []).append(("", p, flipped))
@@ -984,13 +1009,35 @@ class Hub:
                             net = t.text
                     if net is None:
                         continue
+                    if im is not None and pname in im.port_iface:
+                        iface, modport = im.port_iface[pname]
+                        if net in boxes and boxes[net]["iface"]:
+                            iface_links.append((iname, pname, net, iface, modport))
+                        elif net in mod.port_iface:
+                            iface_links.append((iname, pname, "", iface, modport))
+                        continue
                     pdir = im.port_dir.get(pname, "inout") if im else "inout"
                     nets.setdefault(net, []).append((iname, pname, pdir))
+            for iname, pname, ibox, iface, modport in iface_links:
+                # the whole interface as one edge, the modport telling which way
+                d = idx.iface_port_dir(iface, modport)
+                bd = self._iface_bundle(idx, iface, modport, pname, widths, ibox or ibox) or {}
+                src, dst = (ibox, iname) if d == "input" else (iname, ibox)
+                key = (src, dst, pname)
+                edges[key] = {"from": src, "to": dst, "bundle": pname, "protocol": bd.get("protocol"),
+                              "role": bd.get("role"), "width": bd.get("width", 0), "iface": iface,
+                              "modport": modport, "nets": [[pname, ibox or pname, modport or ""]]}
             for net, ends in nets.items():
                 drivers = [e for e in ends if e[2] == "output"]
                 sinks = [e for e in ends if e[2] == "input"]
-                if not drivers:  # inout or unknown direction: pair everything with the first
-                    drivers, sinks = ends[:1], ends[1:]
+                if not drivers:
+                    # inout or unknown direction: a sibling-to-sibling line
+                    # would be a guess, so only the scope's port (if the net
+                    # is one) is tied to the instances on it
+                    port_end = [e for e in ends if e[0] == ""]
+                    if not port_end:
+                        continue
+                    drivers, sinks = port_end[:1], [e for e in ends if e[0] != ""]
                 for di, dp, _ in drivers:
                     for si, sp, _ in sinks:
                         if di == si:
@@ -1017,6 +1064,23 @@ class Hub:
                 "unlabelled": [(b["name"] + "/" + bd["name"]) for b in boxes.values() for bd in b["bundles"]
                                if bd["protocol"] is None and not bd["label"]]
                 + ["/" + bd["name"] for bd in ports if bd["protocol"] is None and not bd["label"]]}
+
+    def _iface_bundle(self, idx, iface, modport, port, widths, ibox):
+        """An interface port as one bundle: the protocol from the interface's
+        signal names, the role from the modport's directions, the width from
+        the dump's copy of the interface instance (ibox) when it has one."""
+        im = idx.modules.get(iface)
+        if im is None:
+            return None
+        sigs = [n for n in im.decls if n not in im.params]
+        dirs = im.modports.get(modport or "", {})
+        plist = [(n, widths.get((ibox + "." if ibox else "") + n, 1), dirs.get(n, "")) for n in sigs]
+        found = [b for b in ifaces.bundles(plist) if b["protocol"] not in (None, "clock", "reset")]
+        main = found[0] if found else None
+        return {"name": port, "protocol": main["protocol"] if main else None, "role": main["role"] if main else None,
+                "dir": {"output": "out", "input": "in"}.get(idx.iface_port_dir(iface, modport) or "", None),
+                "width": sum(w for _, w, _ in plist), "signals": [port], "iface": iface, "modport": modport,
+                "carries": sigs}
 
     def src_where(self, scope):
         """For a node of the hierarchy: the module that implements it (file
@@ -2150,6 +2214,33 @@ def run_selftest():
           and unnamed[0] not in dg2["unlabelled"])
     hub2.apply("label", {"scope": "TOP.top", "bundle": unnamed[0], "clear": True})
     check("diagram: label cleared", unnamed[0] in hub2.diagram("TOP.top")["unlabelled"])
+    # a SystemVerilog interface between two instances: one edge each way through it
+    with open(os.path.join(src_dir, "bus.sv"), "w") as fh:
+        fh.write("interface bus_if (input logic clk);\n  logic valid, ready; logic [7:0] data;\n"
+                 "  modport mst (output valid, data, input ready);\n  modport slv (input valid, data, output ready);\n"
+                 "endinterface\nmodule src_m (input logic clk, bus_if.mst m);\nendmodule\n"
+                 "module dst_m (input logic clk, bus_if.slv s);\nendmodule\n"
+                 "module top3 (input logic clk);\n  bus_if bus_i (.clk(clk));\n  src_m u_src (.clk(clk), .m(bus_i));\n"
+                 "  dst_m u_dst (.clk(clk), .s(bus_i));\nendmodule\n")
+    vcd3 = os.path.join(tmp, "iface.vcd")
+    with open(vcd3, "w") as fh:
+        fh.write("$timescale 1ns $end\n$scope module top3 $end\n$var wire 1 ! clk $end\n"
+                 "$scope module bus_i $end\n$var wire 1 \" valid $end\n$var wire 1 # ready $end\n$var wire 8 $ data [7:0] $end\n$upscope $end\n"
+                 "$scope module u_src $end\n$var wire 1 % clk $end\n$upscope $end\n"
+                 "$scope module u_dst $end\n$var wire 1 & clk $end\n$upscope $end\n$upscope $end\n"
+                 "$enddefinitions $end\n#0\n0!\n#10\n1!\n")
+    hub3 = Hub(vcd3, rtl=None)
+    hub3.rtl_specs = [os.path.join(src_dir, "bus.sv")]
+    hub3.build_index()
+    dg3 = hub3.diagram("top3")
+    boxes3 = {b["name"]: b for b in dg3["boxes"]}
+    e3 = {(e["from"], e["to"]): e for e in dg3["edges"]}
+    check("diagram: interface instance is a box carrying a valid/ready bus",
+          boxes3.get("bus_i", {}).get("iface") and any(bd["protocol"] == "valid/ready" for bd in boxes3["bus_i"]["bundles"]))
+    check("diagram: modports give the edges their way and role",
+          ("u_src", "bus_i") in e3 and e3[("u_src", "bus_i")]["role"] == "source" and e3[("u_src", "bus_i")]["width"] == 11
+          and ("bus_i", "u_dst") in e3 and e3[("bus_i", "u_dst")]["role"] == "sink")
+    hub3.retire()
     # a filelist without the testbench: the DUT's scope is named after no module
     vcd_tb = os.path.join(tmp, "tb.vcd")
     with open(vcd_tb, "w") as fh:

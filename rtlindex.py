@@ -205,6 +205,10 @@ class Module:
         self.instances = {}  # name -> Instance
         self.gen_labels = {}  # label -> line
         self.params = set()
+        self.kind = "module"  # module / interface / program
+        self.modports = {}  # interface: modport name -> {signal: input/output/inout}
+        self.port_type = {}  # port -> (type name, modport or None) for ports typed by a name (bus_if.mst m)
+        self.port_iface = {}  # port -> (interface module name, modport or None), once the type is known
 
     def add(self, table, name, loc):
         table.setdefault(name, []).append(loc)
@@ -292,6 +296,7 @@ class Parser:
                     k += 1
                 if toks[j].kind == "id":
                     m = Module(toks[j].text, toks[j].file or self.path, toks[j].line)
+                    m.kind = t.text
                     endtok = toks[min(k, len(toks) - 1)]
                     if (endtok.file or self.path) == m.file:
                         m.end_line = endtok.line
@@ -361,6 +366,37 @@ class Parser:
             m.ports.append(name.text)
             m.port_dir[name.text] = direction or "inout"
             m.decls[name.text] = self.loc(name, "port", {"dir": direction or "inout"})
+            # a port typed by a name: `bus_if.mst m`, `bus_if m`, `interface m`
+            # (an interface port, once bus_if is known to be one) or a typedef
+            ids = [t for t in item[:eq] if t.kind == "id" and t.text not in KEYWORDS or t.text == "interface"]
+            has_dir = any(t.text in DIRECTIONS for t in item)  # not the direction carried from the port before
+            if not has_dir and len(ids) >= 2 and ids[-1] is name and ids[0].text not in DECL_START:
+                tname = ids[0].text
+                modport = None
+                pos = item.index(ids[0])
+                if pos + 2 < len(item) and item[pos + 1].text == "." and item[pos + 2].kind == "id":
+                    modport = item[pos + 2].text
+                m.port_type[name.text] = (tname, modport)
+
+    def _modport(self, m, seg):
+        """modport name (input a, b, output c), name2 (...);"""
+        k = 1
+        while k < len(seg):
+            if seg[k].kind != "id" or k + 1 >= len(seg) or seg[k + 1].text != "(":
+                k += 1
+                continue
+            close = _match(seg, k + 1, "(", ")")
+            dirs = {}
+            direction = "inout"
+            for t in seg[k + 2:close]:
+                if t.text in DIRECTIONS:
+                    direction = t.text
+                elif t.text in ("clocking", "import", "export"):
+                    direction = None
+                elif t.kind == "id" and t.text not in KEYWORDS and direction:
+                    dirs[t.text] = direction
+            m.modports[seg[k].text] = dirs
+            k = close + 1
 
     @staticmethod
     def _split(toks, sep):
@@ -435,6 +471,8 @@ class Parser:
                 return
             if head == "return":
                 self._loads(m, seg[1:])
+            if head == "modport":
+                self._modport(m, seg)
             return
         if head in ("localparam", "parameter"):
             self._params(m, seg[1:])
@@ -755,6 +793,31 @@ class Index:
                         self.files.append(inc)  # watched for changes, like the listed ones
             except Exception as exc:  # noqa: BLE001
                 self.errors.append("%s: %s" % (f, exc))
+        self.resolve_iface_ports()
+
+    def resolve_iface_ports(self):
+        """Ports typed by a name are interface ports when that name is an
+        interface here (a typedef otherwise); `interface x` is one whatever
+        the type."""
+        for m in self.modules.values():
+            for port, (tname, modport) in m.port_type.items():
+                target = self.modules.get(tname)
+                if tname == "interface" or (target is not None and target.kind == "interface"):
+                    m.port_iface[port] = (tname, modport)
+
+    def iface_port_dir(self, iface, modport):
+        """What an instance does through an interface port: 'output' when
+        its modport mostly drives (a master / source), 'input' when it
+        mostly reads, None without a modport to tell."""
+        im = self.modules.get(iface)
+        if im is None or not modport or modport not in im.modports:
+            return None
+        dirs = im.modports[modport].values()
+        outs = sum(1 for d in dirs if d == "output")
+        ins = sum(1 for d in dirs if d == "input")
+        if outs == ins:
+            return None
+        return "output" if outs > ins else "input"
 
     reader = None  # callable(rel path) -> text, for sources on another machine
     anchors = {}  # dump scope -> module, see place_roots
@@ -1040,7 +1103,10 @@ class Index:
         for m in self.modules.values():
             mods[m.name] = {
                 "orig": m.orig, "file": m.file, "line": m.line, "end": m.end_line,
+                "kind": m.kind,
                 "ports": [[p, m.port_dir.get(p, "inout")] for p in m.ports],
+                "ifports": {p: list(v) for p, v in m.port_iface.items()},
+                "modports": m.modports,
                 "params": sorted(m.params),
                 "decls": {n: [l.file, l.line, l.col, l.kind] for n, l in m.decls.items()},
                 "drivers": locs(m.drivers), "loads": locs(m.loads),
@@ -1070,6 +1136,9 @@ class Index:
         for name, d in doc["modules"].items():
             m = Module(name, d["file"], d["line"])
             m.orig, m.end_line = d.get("orig", name), d.get("end", d["line"])
+            m.kind = d.get("kind", "module")
+            m.modports = {k: dict(v) for k, v in d.get("modports", {}).items()}
+            m.port_iface = {p: (v[0], v[1] if len(v) > 1 else None) for p, v in d.get("ifports", {}).items()}
             for p, dr in d.get("ports", []):
                 m.ports.append(p)
                 m.port_dir[p] = dr
@@ -1086,6 +1155,7 @@ class Index:
                 m.instances[n] = inst
             idx.modules[name] = m
         idx.hier = dict(doc.get("hier", {}))
+        idx.resolve_iface_ports()
         return idx
 
     # -- Verilator's elaborated XML ------------------------------------------
@@ -1531,6 +1601,29 @@ def run_selftest():
           os.path.join(d, "inc", "body.svh") in idx2.files
           and idx2.module_view(t2, "inc/body.svh")["text"].startswith("logic [7:0] w_inc")
           and any(i[2] == "u_inc" and i[3] == "instance" for i in idx2.module_view(t2, "inc/body.svh")["idents"]))
+    # SystemVerilog interfaces: modports, interface-typed ports, instances
+    with open(os.path.join(d, "bus.sv"), "w") as fh:
+        fh.write("interface bus_if (input logic clk);\n  logic valid, ready; logic [7:0] data;\n"
+                 "  modport mst (output valid, data, input ready);\n  modport slv (input valid, data, output ready);\n"
+                 "endinterface\n"
+                 "module src_m (input logic clk, bus_if.mst m, output logic busy);\n  assign m.valid = 1'b1;\nendmodule\n"
+                 "module dst_m (input logic clk, bus_if.slv s, pkt_t cfg);\nendmodule\n"
+                 "module top3 (input logic clk);\n  bus_if bus_i (.clk(clk));\n  src_m u_src (.clk(clk), .m(bus_i), .busy());\n"
+                 "  dst_m u_dst (.clk(clk), .s(bus_i), .cfg());\nendmodule\n")
+    idx3 = Index([os.path.join(d, "bus.sv")], root=d)
+    bus, src, dst, top3 = (idx3.modules.get(k) for k in ("bus_if", "src_m", "dst_m", "top3"))
+    check("interface: parsed with its modports", bus is not None and bus.kind == "interface"
+          and bus.modports.get("mst") == {"valid": "output", "data": "output", "ready": "input"})
+    check("interface: typed ports resolved, a typedef port is not one",
+          src is not None and src.port_iface.get("m") == ("bus_if", "mst") and dst.port_iface.get("s") == ("bus_if", "slv")
+          and "cfg" not in dst.port_iface and dst.port_type.get("cfg") == ("pkt_t", None))
+    check("interface: modport tells the way", idx3.iface_port_dir("bus_if", "mst") == "output"
+          and idx3.iface_port_dir("bus_if", "slv") == "input" and idx3.iface_port_dir("bus_if", None) is None)
+    check("interface: instance and connections", top3 is not None and top3.instances["bus_i"].mtype == "bus_if"
+          and idx3.resolve_scope("top3.bus_i")[0] is bus)
+    back3 = Index.from_doc(idx3.to_doc())
+    check("interface: design JSON round trip", back3.modules["src_m"].port_iface.get("m") == ("bus_if", "mst")
+          and back3.modules["bus_if"].modports == bus.modports and back3.modules["bus_if"].kind == "interface")
     check("verdi KDB names", is_verdi_db("/x/work.lib++") and is_verdi_db("sim/simv.daidir/")
           and is_elaborated("d.json") and not is_verdi_db("rtl/x.f"))
     js = os.path.join(d, "design.json")

@@ -319,6 +319,10 @@ Python も Verilator も C コンパイラも要らない。ダブルクリッ�
   色はプロトコル)。索引が無ければ箱と束だけが出る。clock / reset は細い点線
 - 配置は要求の向き (master → slave) で左から右へ。左端がスコープの入力ポート、
   右端が出力ポート
+- **SystemVerilog interface**: interface のインスタンスは角の丸い箱になり、中の信号から
+  プロトコルを判定する。`bus_if.mst m` のような interface 型ポートは 1 本の束で、
+  modport の向き (output が多ければ master 側) で線の向きと役割を決める。索引側は
+  `interface` / `modport` / interface 型ポートを解析し、KDB 経由でも同じ情報を書き出す
 - 箱クリックでそのスコープを選択、ダブルクリックで中へ、右クリックでモジュール
   定義 / インスタンス化箇所へ (ソースペイン)。線をクリックするとその束の信号を
   波形に追加。`#diagram=<scope>` を URL に付けると起動時に開く

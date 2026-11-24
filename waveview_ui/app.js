@@ -594,7 +594,7 @@ function renderDiagram(d) {
   for (const b of d.boxes) {
     const left = b.bundles.filter((x) => x.dir === 'in' || x.dir === 'mixed' || !x.dir);
     const right = b.bundles.filter((x) => x.dir === 'out');
-    nodes.set(b.name, { name: b.name, kind: b.in_dump ? 'box' : 'ghost', box: b, in: left, out: right, rank: null });
+    nodes.set(b.name, { name: b.name, kind: (b.in_dump ? 'box' : 'ghost') + (b.iface ? ' iface' : ''), box: b, in: left, out: right, rank: null });
   }
   const edges = d.edges.map((e) => ({ ...e, to: e.to === '' ? '\u0000out' : e.to }));
   const RESPONSE = new Set(['slave', 'sink', 'completer', 'manager', 'agent', 'responder']);
@@ -628,15 +628,32 @@ function renderDiagram(d) {
     n.w = n.kind === 'port' ? 150 : 200;
     n.h = Math.max(44, 38 + 13 * rows + (n.kind === 'port' ? 0 : 20)) + (sig ? Math.min(60, 7 * Math.log2(1 + sig)) : 0);
   }
-  // columns, ordered by the barycentre of the predecessors
+  // columns, ordered so that connected boxes sit side by side: the
+  // barycentre of the neighbours, swept left to right and back a few times
+  // (a pair like hif0 → ch0, hif1 → ch1 then lines up), names breaking ties
   const cols = [];
   for (const n of nodes.values()) (cols[n.rank] = cols[n.rank] || []).push(n);
+  const succs = new Map([...nodes.keys()].map((k) => [k, []]));
+  for (const [k, ps] of preds) for (const p of ps) succs.get(p).push(k);
+  const order = new Map();  // name -> position in its column
+  const place = (col) => col.forEach((n, i) => order.set(n.name, i));
+  cols.forEach((col) => { col.sort((a, b) => (b.box ? b.box.signals : 0) - (a.box ? a.box.signals : 0) || a.name.localeCompare(b.name)); place(col); });
+  const bary = (n, side) => { const ns = side.get(n.name).map((p) => order.get(p)).filter((v) => v !== undefined); return ns.length ? ns.reduce((s, v) => s + v, 0) / ns.length : null; };
+  const sweep = (side, cs) => {
+    for (const col of cs) {
+      if (!col) continue;
+      const keyed = col.map((n, i) => [bary(n, side), i, n]);
+      keyed.sort((a, b) => ((a[0] ?? a[1]) - (b[0] ?? b[1])) || a[2].name.localeCompare(b[2].name));
+      col.length = 0; col.push(...keyed.map((k) => k[2])); place(col);
+    }
+  };
+  for (let pass = 0; pass < 3; pass++) {
+    sweep(preds, cols.slice(1));
+    sweep(succs, cols.slice(0, -1).reverse());
+  }
+  sweep(preds, cols.slice(1));
   const yOf = new Map();
-  cols.forEach((col, r) => {
-    if (r > 0) col.sort((a, b) => {
-      const bc = (n) => { const ps = preds.get(n.name).map((p) => yOf.get(p)).filter((v) => v !== undefined); return ps.length ? ps.reduce((s, v) => s + v, 0) / ps.length : 1e9; };
-      return bc(a) - bc(b) || (b.box ? b.box.signals : 0) - (a.box ? a.box.signals : 0);
-    });
+  cols.forEach((col) => {
     let y = 24;
     for (const n of col) { n.y = y; yOf.set(n.name, y + n.h / 2); y += n.h + 22; }
   });
@@ -653,8 +670,13 @@ function renderDiagram(d) {
   const stubY = (n, side, bundle) => { const list = side === 'in' ? n.in : n.out; const i = Math.max(0, list.indexOf(bundle)); return n.y + 38 + (n.kind === 'port' ? 0 : 14) + i * 13; };
   const bundleOf = (n, side, name) => (side === 'in' ? n.in : n.out).find((b) => b.name === name);
   // edges first, under the boxes; labels of the edges between the same two
-  // boxes are spread along the way so that they do not pile up
+  // boxes are spread along the way so that they do not pile up, and only
+  // the three widest of a pair get one (the rest say it on hover)
   const pairSeen = new Map();
+  const pairCount = new Map();
+  for (const e of edges) { const pk = [e.from, e.to].sort().join('\u0001'); pairCount.set(pk, (pairCount.get(pk) || 0) + 1); }
+  const pairRank = new Map();
+  for (const e of [...edges].sort((a, b) => b.width - a.width)) { const pk = [e.from, e.to].sort().join('\u0001'); const r = pairRank.get(pk) || 0; e._rank = r; pairRank.set(pk, r + 1); }
   for (const e of edges) {
     const a = nodes.get(e.from), b = nodes.get(e.to);
     if (!a || !b) continue;
@@ -665,7 +687,7 @@ function renderDiagram(d) {
     const sw = isPlumbing(e) ? 1 : 1 + Math.min(5, Math.log2(1 + e.width) / 2);
     const mx = (x1 + x2) / 2;
     el('path', { d: `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`, stroke: protoColor(e.protocol), 'stroke-width': sw.toFixed(1) }, g);
-    if (!isPlumbing(e)) {
+    if (!isPlumbing(e) && e._rank < 3) {
       const pk = [a.name, b.name].sort().join('\u0001');
       const k = pairSeen.get(pk) || 0;
       pairSeen.set(pk, k + 1);
@@ -697,7 +719,7 @@ function renderDiagram(d) {
     } else {
       const b = n.box;
       text(g, 10, 18, b.name, 'name');
-      text(g, 10, 32, (b.module ? b.module + '  ·  ' : '') + `${b.signals} sig · ${b.insts} inst` + (b.loc ? ` · ${b.loc} lines` : '') + (b.in_dump ? '' : ' · not dumped'), 'dim');
+      text(g, 10, 32, (b.module ? b.module + (b.iface ? ' (interface)' : '') + '  ·  ' : '') + `${b.signals} sig · ${b.insts} inst` + (b.loc ? ` · ${b.loc} lines` : '') + (b.in_dump ? '' : ' · not dumped'), 'dim');
       n.in.forEach((x, i) => stub(8, 52 + i * 13, x, 'start', b.name, '▸ ' + bundleLabel(x)));
       n.out.forEach((x, i) => stub(n.w - 8, 52 + i * 13, x, 'end', b.name, bundleLabel(x) + ' ▸'));
       g.addEventListener('click', () => { S.scope = b.scope; S.pick.clear(); renderTree(); renderSigList(); for (const o of svg.querySelectorAll('.box.on')) o.classList.remove('on'); g.classList.add('on'); });
