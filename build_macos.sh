@@ -83,7 +83,10 @@ with open(path, "wb") as fh:
 EOF
 codesign --force --deep --sign - "$WORK/dist/waveview.app"
 
-rm -rf "$ROOT/dist/waveview.app"
+# New files, not overwritten ones: a binary that was run before keeps its
+# validated code signature in the kernel's cache, and new contents under
+# the same inode get killed on launch (and on any mmap) until it is gone.
+rm -rf "$ROOT/dist/waveview.app" "$ROOT/dist/waveview"
 cp -R "$WORK/dist/waveview.app" "$ROOT/dist/waveview.app"
 cp "$WORK/dist/waveview" "$ROOT/dist/waveview"
 ls -ld "$ROOT/dist/waveview.app" "$ROOT/dist/waveview"

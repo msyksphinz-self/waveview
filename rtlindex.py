@@ -27,7 +27,8 @@ Usage:
     rtlindex.py --selftest
 """
 
-from __future__ import annotations
+# no "from __future__ import annotations": this file is sent to the python3 of
+# a build server, which may be 3.6 (RHEL 8)
 
 import argparse
 import json
