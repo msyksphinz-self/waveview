@@ -18,6 +18,9 @@ import remote
 
 DRIVES = "*"  # the "directory" above C:\ on Windows
 LOCAL_DUMPS = (".fst", ".vcd", ".fsdb")
+# what a listing shows besides folders: the dumps, or what --rtl takes (a
+# filelist, a design JSON, a Verilator XML; a folder is chosen as such)
+KINDS = {"dumps": LOCAL_DUMPS, "rtl": (".f", ".vc", ".flist", ".json", ".xml")}
 MAX_ENTRIES = 5000
 MAC = sys.platform == "darwin"
 
@@ -43,7 +46,11 @@ pwd
 for f in *; do
   if [ -d "$f" ]; then printf 'd 0 %s\n' "$f"
   elif [ -f "$f" ]; then
-    case "$f" in *.fst|*.FST|*.fsdb|*.FSDB) printf 'f %s %s\n' "$(wc -c < "$f" | tr -d ' ')" "$f";; esac
+    if [ "$2" = rtl ]; then
+      case "$f" in *.f|*.F|*.vc|*.flist|*.json|*.xml) printf 'f %s %s\n' "$(wc -c < "$f" | tr -d ' ')" "$f";; esac
+    else
+      case "$f" in *.fst|*.FST|*.fsdb|*.FSDB) printf 'f %s %s\n' "$(wc -c < "$f" | tr -d ' ')" "$f";; esac
+    fi
   fi
 done
 '''
@@ -93,18 +100,20 @@ def _listing(path, parent, entries):
     return {"path": path, "parent": parent, "entries": entries[:MAX_ENTRIES], "more": len(entries) > MAX_ENTRIES}
 
 
-def list_remote(host, path=""):
-    """A directory on the server: subdirectories and the dumps a
-    server can serve, FST and FSDB. An empty path
-    is the home directory, which also serves as the connection check."""
+def list_remote(host, path="", kind="dumps"):
+    """A directory on the server: subdirectories and the dumps a server can
+    serve, FST and FSDB (or, for kind "rtl", what --rtl takes). An empty
+    path is the home directory, which also serves as the connection check."""
     r = remote_for(host)
+    if kind not in KINDS:
+        raise remote.RemoteError("no such listing kind: %r" % (kind,))
     path = path or "."
     if path == "~":
         path = "."
     elif path.startswith("~/"):
         path = path[2:] or "."
     try:
-        raw = r.run("sh -c %s sh %s" % (shlex.quote(_LIST), shlex.quote(path)), timeout=30)
+        raw = r.run("sh -c %s sh %s %s" % (shlex.quote(_LIST), shlex.quote(path), kind), timeout=30)
     except subprocess.TimeoutExpired:
         raise remote.RemoteError("%s did not answer in 30 s" % host)
     lines = raw.decode(errors="replace").split("\n")
@@ -118,8 +127,11 @@ def list_remote(host, path=""):
     return _listing(cwd, posixpath.dirname(cwd) if cwd != "/" else None, entries)
 
 
-def list_local(path=""):
-    """A directory on this machine: subdirectories and dumps."""
+def list_local(path="", kind="dumps"):
+    """A directory on this machine: subdirectories and dumps (or, for kind
+    "rtl", what --rtl takes)."""
+    if kind not in KINDS:
+        raise OSError("no such listing kind: %r" % (kind,))
     if path == DRIVES and os.name == "nt":
         roots = [d + ":\\" for d in string.ascii_uppercase if os.path.exists(d + ":\\")]
         return _listing(DRIVES, None, [{"name": d, "dir": True, "size": 0, "path": d} for d in roots])
@@ -130,7 +142,7 @@ def list_local(path=""):
             try:
                 if e.is_dir():
                     entries.append({"name": e.name, "dir": True, "size": 0, "path": e.path})
-                elif e.name.lower().endswith(LOCAL_DUMPS):
+                elif e.name.lower().endswith(KINDS[kind]):
                     entries.append({"name": e.name, "dir": False, "size": e.stat().st_size, "path": e.path})
             except OSError:
                 continue

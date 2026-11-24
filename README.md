@@ -12,7 +12,8 @@ AI agent use together, built for remote development.
   message plus the current view
 - **Source pane, Verdi nTrace style**: active annotation (values at the
   cursor next to every signal), double-click to trace drivers / loads across
-  the hierarchy, into instances and up through ports
+  the hierarchy, into instances and up through ports; right-click a node of
+  the hierarchy tree to open its module or its instantiation
 - **Huge dumps**: FST is read in place, on demand, by a small C helper
   (`fstsrv.c`); opening reads only the hierarchy, views fetch tiles of what is
   on screen, zoomed-out tiles are aggregated in C. A 3.6 GB FST opens in ms
@@ -85,7 +86,9 @@ python3 waveview.py serve build01:/work/sim/w.fsdb --rtl build01:/work/proj/rtl/
 
 `waveview.exe` needs no Python, Verilator or C compiler. Double-click it and a
 window opens (Edge or Chrome in app mode). In **Open…**, choose This PC or a host
-from `~/.ssh/config`, press Connect, browse to a dump and open it. Closing the
+from `~/.ssh/config`, press Connect, browse to a dump and open it; **Browse…**
+next to the RTL field picks the filelist (or design file, or folder) for the
+source view from the same listing. Closing the
 window ends the program. You can also drop a `.fst` / `.vcd` / `.fsdb` on the exe.
 A local FSDB still needs Verdi's `fsdb2vcd`; an FSDB on a server with Verdi is
 read there. With arguments it is the normal command line:

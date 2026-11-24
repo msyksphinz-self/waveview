@@ -872,6 +872,24 @@ class Hub:
         v["parent"] = up[0] if up else None
         return v
 
+    def src_where(self, scope):
+        """For a node of the hierarchy: the module that implements it (file
+        and line) and, when it is an instance, where the parent module
+        instantiates it."""
+        idx = self.index()
+        mod, rest = idx.resolve_scope(scope)
+        if mod is None or rest:
+            raise wq.QueryError("scope %s is not in the source index" % scope)
+        out = {"scope": scope, "module": mod.orig, "file": mod.file, "line": mod.line}
+        up = idx.parent_scope(scope)
+        if up:
+            parent, inst = up
+            pm, _ = idx.resolve_scope(parent)
+            i = pm.instances.get(inst) if pm is not None else None
+            if i is not None:
+                out.update(parent=parent, parent_module=pm.orig, instance=inst, inst_file=i.file, inst_line=i.line)
+        return out
+
     def src_signal(self, full):
         """Where a dump signal comes from: scope, module, declaration and the
         drivers, following the hierarchy."""
@@ -1197,6 +1215,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if path == "/api/src/signal":
                 with hub.lock:
                     return self._send(200, hub.src_signal(query["name"][0]))
+            if path == "/api/src/where":
+                with hub.lock:
+                    return self._send(200, hub.src_where(query["scope"][0]))
             if path == "/api/src/status":
                 return self._send(200, {"status": hub.src_status, "ready": hub.src is not None})
             if path == "/api/src/trace":
@@ -1236,9 +1257,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return None
 
     def _list_dir(self, body):
-        host, path = body.get("host") or "", body.get("path") or ""
+        host, path, kind = body.get("host") or "", body.get("path") or "", body.get("kind") or "dumps"
+        if kind not in opener.KINDS:
+            raise wq.QueryError("no such listing kind: %r" % (kind,))
         try:
-            return self._send(200, opener.list_remote(host, path) if host else opener.list_local(path))
+            return self._send(200, opener.list_remote(host, path, kind) if host else opener.list_local(path, kind))
         except OSError as exc:
             raise wq.QueryError("cannot list %s: %s" % (path or "the folder", exc.strerror or exc))
 
@@ -1886,6 +1909,11 @@ def run_selftest():
     check("source: input traced to parent", any(t["kind"] == "parent_conn" and t["signal"] == "din" for t in tr))
     hub2.op_source({"signal": "u_leaf.r_q"})
     check("source: op_source opens the driver", hub2.state["source"]["line"] == 9)
+    where = hub2.src_where("TOP.top.u_leaf")
+    check("source: where a hierarchy node is defined and instantiated",
+          where["module"] == "leaf" and where["line"] >= 1 and where["parent"] == "TOP.top"
+          and where["instance"] == "u_leaf" and where["inst_line"] > where["line"])
+    check("source: where of the top", "parent" not in hub2.src_where("TOP.top"))
     # a filelist without the testbench: the DUT's scope is named after no module
     vcd_tb = os.path.join(tmp, "tb.vcd")
     with open(vcd_tb, "w") as fh:
@@ -2030,6 +2058,11 @@ def run_selftest():
                   and any(e["name"] == "rtl" and e["dir"] for e in seen["entries"])
                   and any(e["name"] == "r2.fsdb" for e in seen["entries"])
                   and not any(e["name"] == "t.vcd" for e in seen["entries"]))
+            with open(os.path.join(src_dir, "list.f"), "w") as fh:
+                fh.write("t.sv\n")
+            seen = opener.list_remote("buildhost", src_dir, "rtl")
+            check("remote: RTL listing shows filelists, not sources",
+                  [e["name"] for e in seen["entries"] if not e["dir"]] == ["list.f"])
         finally:
             if old is None:
                 os.environ.pop("WAVEVIEW_SSH", None)
@@ -2046,6 +2079,16 @@ def run_selftest():
     listed = c.call("/api/ls", {"path": tmp})
     check("open: local listing", any(e["name"] == "t.vcd" and not e["dir"] for e in listed["entries"])
           and any(e["name"] == "rtl" and e["dir"] for e in listed["entries"]))
+    with open(os.path.join(tmp, "rtl", "files.f"), "w") as fh:
+        fh.write("t.sv\n")
+    listed = c.call("/api/ls", {"path": os.path.join(tmp, "rtl"), "kind": "rtl"})
+    names = [e["name"] for e in listed["entries"] if not e["dir"]]
+    check("open: RTL listing shows filelists, not sources", "files.f" in names and "t.sv" not in names)
+    try:
+        c.call("/api/ls", {"path": tmp, "kind": "everything"})
+        check("open: unknown listing kind refused", False)
+    except wq.QueryError:
+        check("open: unknown listing kind refused", True)
     try:
         c.call("/api/ls", {"host": "-oProxyCommand=x", "path": "/"})
         check("open: option-like host refused", False)

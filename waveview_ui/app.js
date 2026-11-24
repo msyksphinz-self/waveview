@@ -512,11 +512,31 @@ function renderTree() {
       tw.onclick = (e) => { e.stopPropagation(); k.open = !k.open; renderTree(); };
       d.onclick = () => { S.scope = k.path; S.pick.clear(); renderTree(); renderSigList(); };
       d.ondblclick = () => { k.open = !k.open; renderTree(); };
+      d.oncontextmenu = (e) => treeMenu(e, k);
+      d.title = k.path + '  (right-click: open its module or its instantiation in the source)';
       box.appendChild(d);
       if (k.open) walk(k, depth + 1);
     }
   };
   walk(TREE, 0);
+}
+
+// right-click on a hierarchy node: its module in the source, or where the parent instantiates it
+async function treeMenu(e, k) {
+  e.preventDefault();
+  S.scope = k.path; S.pick.clear(); renderTree(); renderSigList();
+  let w;
+  try { w = await api('/api/src/where?scope=' + encodeURIComponent(k.path)); } catch (err) {
+    showMenu(e.clientX, e.clientY, [{ label: 'No source for ' + k.name + ': ' + err.message, fn: () => {} }]);
+    return;
+  }
+  const items = [{ label: `Open module ${w.module}  (${w.file.split('/').pop()}:${w.line})`, fn: () => srcOpen(k.path, w.line) }];
+  if (w.parent) {
+    items.push({ label: `Go to instance ${w.instance} in ${w.parent_module}  (line ${w.inst_line})`,
+                 fn: () => srcOpen(w.parent, w.inst_line, { sel: w.instance }) });
+  }
+  items.push(null, { label: 'Copy path ' + k.path, fn: () => navigator.clipboard && navigator.clipboard.writeText(k.path) });
+  showMenu(e.clientX, e.clientY, items);
 }
 
 function globRe(p) {
@@ -1755,7 +1775,8 @@ function followSource(st) {
 // Open dialog: this PC or a host of ~/.ssh/config, then a folder, then a dump
 // ---------------------------------------------------------------------------
 
-const OP = { host: '', path: '', file: null, seq: 0, hosts: false, hasDump: false, busy: false, local: 'This PC' };
+// mode: 'dump' lists waveform files; 'rtl' lists what --rtl takes, to fill the RTL field
+const OP = { host: '', path: '', file: null, seq: 0, hosts: false, hasDump: false, busy: false, local: 'This PC', mode: 'dump', rtlDir: '' };
 const OTHER_HOST = '\u0000other';
 
 function opRemembered(key) { try { return localStorage.getItem('wv-open-' + key) || ''; } catch (e) { return ''; } }
@@ -1779,17 +1800,19 @@ function opPick(entry, row) {
 
 async function opList(host, path) {
   const seq = ++OP.seq;
-  OP.file = null;
+  const rtl = OP.mode === 'rtl';
+  if (!rtl) OP.file = null;
   $('op-open').disabled = true;
   $('op-list').replaceChildren();
   opMsg(host ? `Connecting to ${host}…` : 'Reading…');
   try {
-    const d = await api('/api/ls', { host, path });
+    const d = await api('/api/ls', { host, path, kind: rtl ? 'rtl' : 'dumps' });
     if (seq !== OP.seq) return;
-    OP.host = host; OP.path = d.path; OP.parent = d.parent;
+    OP.host = host; OP.parent = d.parent;
+    if (rtl) { OP.rtlDir = d.path; opRemember('rtldir:' + host, d.path); } else { OP.path = d.path; opRemember('path:' + host, d.path); }
     $('op-path').value = d.path === '*' ? '' : d.path;
     $('op-up').disabled = d.parent === null || d.parent === undefined;
-    opRemember('host', host); opRemember('path:' + host, d.path);
+    opRemember('host', host);
     for (const e of d.entries) {
       const row = document.createElement('div');
       row.className = 'op-item' + (e.dir ? ' dir' : '');
@@ -1800,15 +1823,49 @@ async function opList(host, path) {
       size.textContent = e.dir ? '' : opSize(e.size);
       row.append(name, size);
       if (e.dir) row.onclick = () => opList(host, e.path);
-      else { row.onclick = () => opPick(e, row); row.ondblclick = () => { opPick(e, row); opOpen(); }; }
+      else if (rtl) row.onclick = () => opRtlChoose(e.path);
+      else {
+        row.onclick = () => opPick(e, row);
+        row.ondblclick = () => { opPick(e, row); opOpen(); };
+        if (OP.file && OP.file.path === e.path) opPick(e, row);  // back from the RTL listing: still chosen
+      }
       $('op-list').append(row);
     }
     const files = d.entries.filter((e) => !e.dir).length;
-    opMsg(`${host || OP.local}: ${files} waveform file${files === 1 ? '' : 's'} here` + (d.more ? ' (list cut short)' : ''));
+    if (rtl) opMsg(`${host || OP.local}: click a filelist (.f), a design .json / .xml, or press Use this folder` + (d.more ? ' (list cut short)' : ''));
+    else opMsg(`${host || OP.local}: ${files} waveform file${files === 1 ? '' : 's'} here` + (d.more ? ' (list cut short)' : ''));
   } catch (err) {
     if (seq !== OP.seq) return;
     opMsg(err.message + (host ? '  (ssh must log in without a prompt: a key with ssh-agent, and a known host key)' : ''), true);
   }
+}
+
+// -- the RTL field from a listing: a filelist / design file, or the folder shown
+function opSetMode(mode) {
+  OP.mode = mode;
+  const rtl = mode === 'rtl';
+  $('op-rtl-browse').hidden = rtl;
+  $('op-rtl-here').hidden = !rtl;
+  $('op-rtl-back').hidden = !rtl;
+  $('opendlg').classList.toggle('rtl-mode', rtl);
+}
+function opRtlBrowse() {
+  const host = opChosenHost();
+  if (host !== OP.host) { opMsg('Press Connect first', true); return; }
+  opSetMode('rtl');
+  const typed = $('op-rtl').value.trim();
+  // start where the field points (its folder), else where the RTL was last chosen, else at the dump
+  let start = opRemembered('rtldir:' + host) || OP.path;
+  if (typed) start = /\.(f|F|vc|flist|json|xml)$/.test(typed) ? typed.replace(/[\\/][^\\/]*$/, '') || typed : typed;
+  opList(OP.host, start);
+}
+function opRtlChoose(path) {
+  $('op-rtl').value = path;
+  opRtlBack();
+}
+function opRtlBack() {
+  opSetMode('dump');
+  opList(OP.host, OP.path);
 }
 
 async function opOpen() {
@@ -1832,6 +1889,7 @@ function opHostChanged() {
   const other = $('op-host').value === OTHER_HOST;
   $('op-manual').hidden = !other;
   const host = opChosenHost();
+  opSetMode('dump');
   $('op-rtl').value = opRemembered('rtl:' + host);
   // a folder belongs to one machine: never carry it over to another
   if (other && !host) { $('op-path').value = ''; $('op-list').replaceChildren(); OP.file = null; $('op-open').disabled = true; opMsg('Enter a host, then Connect'); $('op-manual').focus(); return; }
@@ -1863,7 +1921,10 @@ $('op-connect').onclick = () => { const h = opChosenHost(); if (h || $('op-host'
 $('op-go').onclick = () => opList(opChosenHost(), $('op-path').value.trim());
 $('op-up').onclick = () => { if (OP.parent !== null && OP.parent !== undefined) opList(OP.host, OP.parent); };
 $('op-open').onclick = opOpen;
-$('op-cancel').onclick = () => $('opendlg').close();
+$('op-rtl-browse').onclick = opRtlBrowse;
+$('op-rtl-here').onclick = () => opRtlChoose(OP.rtlDir);
+$('op-rtl-back').onclick = opRtlBack;
+$('op-cancel').onclick = () => { opSetMode('dump'); $('opendlg').close(); };
 $('op-path').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('op-go').click(); });
 $('op-manual').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('op-connect').click(); });
 $('op-manual').addEventListener('input', () => { OP.seq++; $('op-path').value = opRemembered('path:' + opChosenHost()); $('op-list').replaceChildren(); OP.file = null; $('op-open').disabled = true; opMsg('Press Connect'); });

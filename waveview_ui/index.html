@@ -101,7 +101,10 @@
   <div id="op-list" tabindex="0"></div>
   <div class="op-row">
     <label for="op-rtl">RTL</label>
-    <input id="op-rtl" spellcheck="false" placeholder="optional: filelist (.f) or folder, for the source view">
+    <input id="op-rtl" spellcheck="false" placeholder="optional: filelist (.f), design .json / .xml or folder, for the source view">
+    <button id="op-rtl-browse" title="Choose the filelist or folder from a listing">Browse…</button>
+    <button id="op-rtl-here" hidden title="Use the folder shown above as the RTL">Use this folder</button>
+    <button id="op-rtl-back" hidden title="Back to the waveform files">Back</button>
   </div>
   <div id="op-msg" class="dim"></div>
   <div class="dlgbtns"><button id="op-cancel">Cancel</button><button id="op-open" class="primary" disabled>Open</button></div>
@@ -122,6 +125,7 @@
       <tr><th>h d s b o</th><td>Radix hex/dec/signed/bin/oct</td><th>/ or Ctrl+F</th><td>Search</td></tr>
       <tr><th>a</th><td>Send to AI</td><th>Esc</th><td>Clear selection, close menus</td></tr>
       <tr><th>Double-click row</th><td>Trace drivers in the source</td><th>S</th><td>Show / hide the source pane</td></tr>
+      <tr><th>Right-click tree node</th><td>Open its module, or where the parent instantiates it</td><th></th><td></td></tr>
       <tr><th>Source: double-click</th><td>Drivers (Shift: loads); instance: go in</td><th>Source: Ctrl+click</th><td>Add the signal to the waveform</td></tr>
       <tr><th>Alt+← / →</th><td>Source history back / forward</td><th>[ / ]</th><td>Previous / next named cursor</td></tr>
       <tr><th>Right-click wave</th><td>Named cursor, comment, arrow here; edit / remove one</td><th>Load rc / .wvrc</th><td>Open / save a debug view file</td></tr>
