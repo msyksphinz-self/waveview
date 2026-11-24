@@ -2017,11 +2017,14 @@ def run_selftest():
             got = r.read_files([os.path.join(src_dir, "t.sv")])
             check("remote: RTL indexed on the server and read over ssh",
                   "leaf" in doc["modules"] and "module leaf" in got[os.path.join(src_dir, "t.sv")])
+            with open(os.path.join(tmp, "r2.fsdb"), "w") as fh:
+                fh.write("stand-in")
             seen = opener.list_remote("buildhost", tmp)
             # pwd on the "server" may spell the directory through a symlink (macOS: /var -> /private/var)
             check("remote: directory listing", os.path.realpath(seen["path"]) == os.path.realpath(tmp)
                   and any(e["name"] == "r.fst" and e["size"] == os.path.getsize(fst) for e in seen["entries"])
                   and any(e["name"] == "rtl" and e["dir"] for e in seen["entries"])
+                  and any(e["name"] == "r2.fsdb" for e in seen["entries"])
                   and not any(e["name"] == "t.vcd" for e in seen["entries"]))
         finally:
             if old is None:

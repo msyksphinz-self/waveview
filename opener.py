@@ -43,7 +43,7 @@ pwd
 for f in *; do
   if [ -d "$f" ]; then printf 'd 0 %s\n' "$f"
   elif [ -f "$f" ]; then
-    case "$f" in *.fst|*.FST) printf 'f %s %s\n' "$(wc -c < "$f" | tr -d ' ')" "$f";; esac
+    case "$f" in *.fst|*.FST|*.fsdb|*.FSDB) printf 'f %s %s\n' "$(wc -c < "$f" | tr -d ' ')" "$f";; esac
   fi
 done
 '''
@@ -94,7 +94,8 @@ def _listing(path, parent, entries):
 
 
 def list_remote(host, path=""):
-    """A directory on the server: subdirectories and FST files. An empty path
+    """A directory on the server: subdirectories and the dumps a
+    server can serve, FST and FSDB. An empty path
     is the home directory, which also serves as the connection check."""
     r = remote_for(host)
     path = path or "."
