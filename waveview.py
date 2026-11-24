@@ -1957,16 +1957,19 @@ def run_selftest():
     fsdb = os.path.join(tmp, "t.fsdb")
     with open(fsdb, "w") as fh:
         fh.write("stand-in")
-    old = os.environ.get("FSDB2VCD")
+    # WAVE_EAGER: where Verdi is installed fsdbsrv would open it instead
+    old = {k: os.environ.get(k) for k in ("FSDB2VCD", "WAVE_EAGER")}
     os.environ["FSDB2VCD"] = fake
+    os.environ["WAVE_EAGER"] = "1"
     try:
         w = wq.load(fsdb)
         check("FSDB through fsdb2vcd", "tb_wave.dut.data" in w.by_name)
     finally:
-        if old is None:
-            os.environ.pop("FSDB2VCD", None)
-        else:
-            os.environ["FSDB2VCD"] = old
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
     # a dump and RTL on "another machine": ssh replaced by a local stand-in,
     # which builds fstsrv from source like a real server would
     conv = w2i.build_fst_converter(verbose=False)

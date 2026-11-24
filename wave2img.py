@@ -483,21 +483,58 @@ def build_fsdb_tool(verbose=True):
                              % verdi_home())
         return None
     include, lib = reader
-    compiler = os.environ.get("CXX") or shutil.which("c++") or shutil.which("g++")
-    if compiler is None:
+    compilers = cxx_compilers()
+    if not compilers:
         if verbose:
             sys.stderr.write("warning: no C++ compiler found for the FSDB reader\n")
         return None
-    cmd = [compiler, "-O2", "-w", "-I" + include, "-o", binary, source, "-L" + lib, "-Wl,-rpath," + lib,
-           "-lnffr", "-lnsys", "-ldl", "-lpthread", "-lz"]
-    done = subprocess.run(cmd, capture_output=True, text=True)
-    if done.returncode == 0 and os.path.isfile(binary):
-        return binary
+    # the first c++ on PATH may be a private toolchain that cannot build
+    # here: try the others before giving up
+    failed = []
+    for compiler in compilers:
+        cmd = [compiler, "-O2", "-w", "-I" + include, "-o", binary, source, "-L" + lib, "-Wl,-rpath," + lib,
+               "-lnffr", "-lnsys", "-ldl", "-lpthread", "-lz"]
+        done = subprocess.run(cmd, capture_output=True, text=True)
+        if done.returncode == 0 and os.path.isfile(binary):
+            return binary
+        failed.append((cmd, done))
     if verbose:
+        cmd, done = failed[0]
         sys.stderr.write("warning: building the FSDB reader failed (FSDB goes through fsdb2vcd):\n")
         sys.stderr.write("  " + " ".join(cmd) + "\n")
         sys.stderr.write((done.stderr or done.stdout).strip()[-2000:] + "\n")
+        if len(failed) > 1:
+            sys.stderr.write("  (also failed with: %s)\n" % ", ".join(c[0] for c, _ in failed[1:]))
     return None
+
+
+def cxx_compilers():
+    """C++ compilers to try, in order: $CXX, c++ / g++ on PATH, the system's."""
+    out = []
+    for c in (os.environ.get("CXX"), shutil.which("c++"), shutil.which("g++"), "/usr/bin/c++", "/usr/bin/g++"):
+        if c and c not in out and (shutil.which(c) or os.path.isfile(c)):
+            out.append(c)
+    return out
+
+
+def script_argv(binary):
+    """The argv prefix that runs a tool. Verdi's commands are one #!/bin/sh
+    wrapper written in bash; where /bin/sh is another shell (dash on
+    Debian / Ubuntu) it stops with a syntax error, so such a script is
+    handed to bash."""
+    if os.name == "nt":
+        return [binary]
+    try:
+        with open(binary, "rb") as fh:
+            first = fh.readline(128).strip()
+    except OSError:
+        return [binary]
+    if first not in (b"#!/bin/sh", b"#! /bin/sh"):
+        return [binary]
+    bash = shutil.which("bash")
+    if bash is None or os.path.basename(os.path.realpath("/bin/sh")) == "bash":
+        return [binary]
+    return [bash, binary]
 
 
 def fsdb_to_vcd(fsdb_path, out_path):
@@ -521,6 +558,8 @@ def fsdb_to_vcd(fsdb_path, out_path):
         return False
     template = os.environ.get("FSDB2VCD_CMD", "{bin} {in} -o {out}")
     cmd = [w.format(**{"bin": binary, "in": fsdb_path, "out": out_path}) for w in shlex.split(template)]
+    if cmd and cmd[0] == binary:
+        cmd[:1] = script_argv(binary)
     done = subprocess.run(cmd, capture_output=True, text=True)
     if done.returncode != 0 or not os.path.isfile(out_path):
         sys.stderr.write("error: fsdb2vcd failed (%s):\n%s\n" % (" ".join(cmd), (done.stderr or done.stdout).strip()[-2000:]))

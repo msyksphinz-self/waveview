@@ -235,9 +235,13 @@ I="$V/share/FsdbReader"
 L=""
 for s in LINUX64 linux64 LINUX linux .; do if ls "$I/$s"/libnffr.* >/dev/null 2>&1; then L="$I/$s"; break; fi; done
 if [ -z "$L" ]; then echo "no-fsdb-lib"; exit 0; fi
-CXX=${CXX:-c++}
-$CXX -O2 -w -I"$I" -o "$d/fsdbsrv.tmp" "$d/fsdbsrv.cc" -L"$L" -Wl,-rpath,"$L" -lnffr -lnsys -ldl -lpthread -lz 2>"$d/build.log" \
-  || { echo "build-failed $d/build.log"; tail -5 "$d/build.log"; exit 0; }
+: > "$d/build.log"
+built=""
+for x in "$CXX" c++ g++ /usr/bin/c++ /usr/bin/g++; do
+  [ -n "$x" ] && command -v "$x" >/dev/null 2>&1 || continue
+  if "$x" -O2 -w -I"$I" -o "$d/fsdbsrv.tmp" "$d/fsdbsrv.cc" -L"$L" -Wl,-rpath,"$L" -lnffr -lnsys -ldl -lpthread -lz 2>>"$d/build.log"; then built=1; break; fi
+done
+if [ -z "$built" ]; then echo "build-failed $d/build.log"; tail -5 "$d/build.log"; exit 0; fi
 mv "$d/fsdbsrv.tmp" "$d/fsdbsrv" && echo "ok $d/fsdbsrv"
 ''',
 }

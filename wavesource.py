@@ -87,11 +87,15 @@ class LazyFst(wq.Wave):
         dump = w2i.Dump()
         exp = 0
         width_of = {}
+        ended = False
         for line in self.proc.stdout:
             line = line.rstrip("\n")
             if line == "end":
+                ended = True
                 break
             kind, _, rest = line.partition(" ")
+            if kind == "!":
+                raise wq.QueryError("%s: %s" % (tool, rest.strip()))
             if kind == "timescale":
                 exp = int(rest)
             elif kind == "range":
@@ -102,6 +106,8 @@ class LazyFst(wq.Wave):
                 h, w = int(h), int(w)
                 width_of[h] = w
                 dump.signals.append(w2i.Signal(name, w, h, len(dump.signals)))
+        if not ended:
+            raise wq.QueryError("%s stopped while listing the signals of %s" % (tool, path))
         dump.timescale = _timescale(exp)
         if dump.end_time <= dump.start_time:
             dump.end_time = dump.start_time + 1
