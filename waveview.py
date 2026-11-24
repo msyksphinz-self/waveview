@@ -956,6 +956,11 @@ class Hub:
         if mod is not None:
             for name in mod.instances:
                 box(name)
+        # where each instance comes in the source: the layout's last resort
+        # for telling the upstream of two boxes that drive each other
+        order = {n: k for k, n in enumerate(mod.instances)} if mod is not None else {}
+        for b in boxes.values():
+            b["order"] = order.get(b["name"], len(order))
         # each box's interfaces: its ports (index) or its port-like dump signals
         for b in boxes.values():
             d = kids.get(b["name"])
@@ -1060,6 +1065,11 @@ class Hub:
                                                    "role": bd["role"] if bd else None, "width": 0, "nets": []})
                         e["width"] += widths.get(net, widths.get(di + "." + dp, 1))
                         e["nets"].append([dp, net, sp])
+        # which way is the request: names like cmd / valid / addr go forward,
+        # ready / ack / rdata / credit come back. The layout uses it where
+        # two boxes drive each other with no protocol to say who is master
+        for e in edges.values():
+            e["req"] = sum(_request_score(dp) + _request_score(net) for dp, net, _sp in e["nets"])
         # names given by a person or an agent (op_label), on bundles and their edges
         labels = self.state.get("iflabels", {}).get(scope, {})
         for b in boxes.values():
@@ -1962,6 +1972,20 @@ def print_snapshot(snap, radix="hex"):
         print("visible cycles (%d%s):" % (tb["total"], ", first %d shown" % len(tb["rows"]) if tb["total"] > len(tb["rows"]) else ""))
         for line in wq.text_table(["cycle", "time"] + short, tb["rows"]):
             print("  " + line)
+
+
+_REQUEST_WORDS = re.compile(r"(^|_)(valid|vld|req|[rw]?cmd|[rw]?addr|adr|wdata|wdat|wr|we|wen|en|start|strb|strobe|"
+                            r"push|sel|enable|write|read|rd|burst|len|size|id|tag)(_|$|\d)", re.I)
+_RESPONSE_WORDS = re.compile(r"(^|_)(ready|rdy|ack|gnt|grant|resp|rsp|rdata|rdat|credit|crd|crdv|done|full|empty|"
+                             r"pop|stall|busy|err|error|irq|int)(_|$|\d)", re.I)
+
+
+def _request_score(name):
+    """+1 for a name that sounds like a request, -1 for a response, else 0."""
+    if not name:
+        return 0
+    leaf = name.split(".")[-1]
+    return (1 if _REQUEST_WORDS.search(leaf) else 0) - (1 if _RESPONSE_WORDS.search(leaf) else 0)
 
 
 def net_key(toks):

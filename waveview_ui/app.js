@@ -734,8 +734,27 @@ function renderDiagram(d) {
   // ranks: longest path from the sources along the request direction (a
   // slave's response edge and the clock / reset fan-out do not place a box)
   const preds = new Map([...nodes.keys()].map((k) => [k, []]));
+  // two boxes that drive each other with no master / slave between them:
+  // an even exchange (channel 0 and 1 syncing, the same width each way)
+  // makes them peers, neither before the other; an uneven one goes the way
+  // of the source, the instance written first being upstream
+  const widthTo = new Map(), reqTo = new Map();
+  for (const e of edges) if (!isPlumbing(e)) { const k = e.from + '\u0001' + e.to; widthTo.set(k, (widthTo.get(k) || 0) + e.width); reqTo.set(k, (reqTo.get(k) || 0) + (e.req || 0)); }
+  const orderOf = (n) => (nodes.get(n) && nodes.get(n).box ? nodes.get(n).box.order : -1);
+  const skip = (e) => {
+    if (e.role) return false;
+    const kf = e.from + '\u0001' + e.to, kb = e.to + '\u0001' + e.from;
+    if (!widthTo.has(kb)) return false;
+    // what the names say first (cmd / valid / addr forward, ready / ack / rdata back),
+    // then an even exchange makes peers, then the order in the source
+    const rf = reqTo.get(kf), rb = reqTo.get(kb);
+    if (rf !== rb) return rf < rb;
+    const fwd = widthTo.get(kf), back = widthTo.get(kb);
+    if (Math.abs(fwd - back) <= 0.15 * Math.max(fwd, back)) return true;  // peers
+    return orderOf(e.from) > orderOf(e.to);
+  };
   for (const e of edges) {
-    if (!nodes.has(e.from) || !nodes.has(e.to) || e.from === e.to || isPlumbing(e) || RESPONSE.has(e.role)) continue;
+    if (!nodes.has(e.from) || !nodes.has(e.to) || e.from === e.to || isPlumbing(e) || RESPONSE.has(e.role) || skip(e)) continue;
     preds.get(e.to).push(e.from);
   }
   const state = new Map();
@@ -814,10 +833,15 @@ function renderDiagram(d) {
     if (!a || !b) continue;
     const fb = bundleOf(a, 'out', e.bundle) || a.out[0], tb = b.in.find((x) => e.nets.some((nt) => x.signals.includes(nt[2]))) || b.in[0];
     const x1 = a.x + a.w, y1 = fb ? stubY(a, 'out', fb) : a.y + a.h / 2;
-    const x2 = b.x, y2 = tb ? stubY(b, 'in', tb) : b.y + b.h / 2;
+    let x2 = b.x, y2 = tb ? stubY(b, 'in', tb) : b.y + b.h / 2;
     const g = el('g', { class: 'edge' + (isPlumbing(e) ? ' plumbing' : '') });
     const sw = isPlumbing(e) ? 1 : 1 + Math.min(5, Math.log2(1 + e.width) / 2);
-    const mx = (x1 + x2) / 2;
+    let mx = (x1 + x2) / 2;
+    if (a.rank === b.rank) {
+      // peers in one column: out to the right and back in on the right side
+      x2 = b.x + b.w; mx = x1 + 70;
+      el('path', { d: `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`, stroke: protoColor(e.protocol), 'stroke-width': sw.toFixed(1) }, g);
+    } else
     el('path', { d: `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`, stroke: protoColor(e.protocol), 'stroke-width': sw.toFixed(1) }, g);
     if (!isPlumbing(e) && e._rank < 3) {
       const pk = [a.name, b.name].sort().join('\u0001');
