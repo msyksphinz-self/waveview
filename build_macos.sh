@@ -57,6 +57,7 @@ cd "$ROOT"
     --add-data "$ROOT/fstsrv.c:." \
     --add-data "$ROOT/fsdbsrv.cc:." \
     --add-data "$ROOT/rtlindex.py:." \
+    --add-data "$ROOT/npi_export.py:." \
     --add-binary "$WORK/helpers/fstsrv:." \
     --add-binary "$WORK/helpers/fst2vcd_mini:." \
     waveview.py

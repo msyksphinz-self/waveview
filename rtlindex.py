@@ -1146,9 +1146,90 @@ class _XmlModule:
                 self._port_toks(c, toks)
 
 
+def is_verdi_db(spec):
+    """A Verdi KDB: vericom's work.lib++ or a VCS simv.daidir (-kdb)."""
+    return spec.rstrip("/").endswith((".lib++", ".daidir"))
+
+
+def is_elaborated(spec):
+    """Whether --rtl names an elaborated design rather than sources."""
+    return spec.endswith((".json", ".xml")) or is_verdi_db(spec)
+
+
+def verdi_home():
+    home = os.environ.get("VERDI_HOME")
+    if home and os.path.isdir(home):
+        return home
+    import shutil
+
+    exe = shutil.which("verdi") or shutil.which("vericom")
+    if exe:
+        home = os.path.dirname(os.path.dirname(os.path.realpath(exe)))
+        if os.path.isdir(os.path.join(home, "share", "NPI")):
+            return home
+    return None
+
+
+def export_verdi(spec, quiet=True):
+    """Design JSON for a Verdi KDB, written by npi_export.py under Verdi's
+    own Python with its NPI libraries, and cached until the KDB changes.
+    Needs VERDI_HOME (or verdi on PATH) and a Verdi license
+    (SNPSLMD_LICENSE_FILE). Returns the JSON path."""
+    import glob
+    import hashlib
+    import subprocess
+
+    spec = os.path.abspath(spec.rstrip("/"))
+    if not os.path.isdir(spec):
+        raise FileNotFoundError("no such KDB: %s" % spec)
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
+    cache_dir = os.path.join(base, "waveview", "design")
+    os.makedirs(cache_dir, exist_ok=True)
+    out = os.path.join(cache_dir, hashlib.sha1(spec.encode()).hexdigest()[:16] + ".json")
+    newest = os.stat(spec).st_mtime
+    for n in os.listdir(spec):
+        try:
+            newest = max(newest, os.stat(os.path.join(spec, n)).st_mtime)
+        except OSError:
+            pass
+    if os.path.isfile(out) and os.stat(out).st_mtime >= newest:
+        return out
+    home = verdi_home()
+    if home is None:
+        raise RuntimeError("%s is a Verdi KDB: set VERDI_HOME (or put verdi on PATH) to export it" % spec)
+    script = os.environ.get("WAVEVIEW_NPI_EXPORT") or os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                                     "npi_export.py")
+    if not os.path.isfile(script):
+        raise RuntimeError("npi_export.py not found (looked at %s)" % script)
+    pythons = sorted(glob.glob(os.path.join(home, "platform", "linux64", "python-3.*", "bin", "python3")))
+    python = pythons[-1] if pythons else "python3"
+    env = dict(os.environ)
+    env["VERDI_HOME"] = home
+    env.setdefault("NOVAS_HOME", home)
+    env.setdefault("SNPSLMD_QUEUE", "true")
+    libs = [os.path.join(home, "share", "NPI", "lib", "linux64"), os.path.join(home, "platform", "linux64", "bin")]
+    if pythons:
+        libs.append(os.path.join(os.path.dirname(os.path.dirname(python)), "lib"))
+    env["LD_LIBRARY_PATH"] = ":".join(libs + [env["LD_LIBRARY_PATH"]] if env.get("LD_LIBRARY_PATH") else libs)
+    tmp = out + ".tmp"
+    cmd = [python, script, spec, "-o", tmp] + (["--quiet"] if quiet else [])
+    # stdout/stderr spelled out: this may run on a server's Python 3.6
+    done = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, env=env,
+                          cwd=os.path.dirname(spec))
+    if done.returncode != 0 or not os.path.isfile(tmp):
+        tail = (done.stderr or done.stdout).strip().split("\n")
+        tail = "\n".join(l for l in tail if l.strip() and "Synopsys" not in l and "license agreement" not in l)[-1500:]
+        raise RuntimeError("exporting %s with Verdi's NPI failed (%s):\n%s" % (spec, " ".join(cmd[:2]), tail))
+    os.replace(tmp, out)
+    return out
+
+
 def load_any(specs, root=None):
     """An Index from what the user pointed at: a design JSON, a Verilator
-    XML, or sources (.f filelists, files, directories)."""
+    XML, a Verdi KDB (work.lib++ or simv.daidir, exported through Verdi's
+    NPI), or sources (.f filelists, files, directories)."""
+    if len(specs) == 1 and is_verdi_db(specs[0]):
+        return Index.load_json(export_verdi(specs[0]), root=root)
     if len(specs) == 1 and specs[0].endswith(".json"):
         return Index.load_json(specs[0], root=root)
     if len(specs) == 1 and specs[0].endswith(".xml"):
@@ -1294,6 +1375,8 @@ def run_selftest():
     check("loads include instance inputs", any(t["kind"] == "port_input" for t in loads))
     v = idx.module_view(leaf)
     check("module view idents", any(i[2] == "r_q" and i[3] == "signal" for i in v["idents"]))
+    check("verdi KDB names", is_verdi_db("/x/work.lib++") and is_verdi_db("sim/simv.daidir/")
+          and is_elaborated("d.json") and not is_verdi_db("rtl/x.f"))
     js = os.path.join(d, "design.json")
     idx.save_json(js)
     back = Index.load_json(js)

@@ -723,9 +723,9 @@ class Hub:
             if specs and remote.is_remote(specs[0]):
                 self._build_remote_index(specs, t0)
                 return
-            if len(specs) == 1 and specs[0].endswith((".json", ".xml")):
-                # an elaborated design: Verilator --xml-only, or design JSON
-                # from any exporter (e.g. one reading a Verdi KDB / daidir)
+            if len(specs) == 1 and rtlindex.is_elaborated(specs[0]):
+                # an elaborated design: Verilator --xml-only, design JSON from
+                # any exporter, or a Verdi KDB / daidir (exported through NPI)
                 idx = rtlindex.load_any(specs)
                 files = [specs[0]] + [idx.abs(f) for f in idx.files]
             else:
@@ -2084,6 +2084,12 @@ def run_selftest():
     listed = c.call("/api/ls", {"path": os.path.join(tmp, "rtl"), "kind": "rtl"})
     names = [e["name"] for e in listed["entries"] if not e["dir"]]
     check("open: RTL listing shows filelists, not sources", "files.f" in names and "t.sv" not in names)
+    os.makedirs(os.path.join(tmp, "rtl", "work.lib++"))
+    listed = c.call("/api/ls", {"path": os.path.join(tmp, "rtl"), "kind": "rtl"})
+    plain = c.call("/api/ls", {"path": os.path.join(tmp, "rtl")})
+    check("open: a Verdi KDB is listed as one to choose",
+          any(e["name"] == "work.lib++" and e.get("db") for e in listed["entries"])
+          and not any(e.get("db") for e in plain["entries"]))
     try:
         c.call("/api/ls", {"path": tmp, "kind": "everything"})
         check("open: unknown listing kind refused", False)

@@ -87,6 +87,8 @@ example.
 
 ## Writing an exporter
 
+`npi_export.py` is one, for Verdi's KDB (`work.lib++`, `simv.daidir`)
+through the Python NPI; `rtlindex.py` runs it when `--rtl` names a KDB.
 The questions an exporter has to answer from its database, per module:
 ports with direction, declared signals and parameters with locations, the
 left-hand side of every assignment with its kind, every read, and every

@@ -52,6 +52,7 @@ cd src
     --add-data "$(wslpath -w "$PACK/src/fstsrv.c");." \
     --add-data "$(wslpath -w "$PACK/src/fsdbsrv.cc");." \
     --add-data "$(wslpath -w "$PACK/src/rtlindex.py");." \
+    --add-data "$(wslpath -w "$PACK/src/npi_export.py");." \
     --add-binary "$(wslpath -w "$PACK/src/fstsrv.exe");." \
     --add-binary "$(wslpath -w "$PACK/src/fst2vcd_mini.exe");." \
     waveview.py

@@ -357,15 +357,35 @@ waveview.py serve w.fst --rtl design.xml
 
 ### KDB / simv.daidir について
 
-Verdi の KDB や VCS の `simv.daidir` もエラボレーション済みの設計データベースで、
-使えれば上の表の 2 行目と同じ精度になる。ただしどちらも Synopsys の非公開バイナリ
-形式で、読めるのは Verdi の NPI (Novas Programming Interface, C / Tcl / Python) だけ。
-そのため waveview は KDB / daidir を直接は読まず、**NPI で書き出した design JSON を
-読む** 形にしてある。書き出し側 (KDB / daidir → design JSON) は Verdi のライブラリと
-ライセンスがある環境でしか作れず、まだ用意していない。形式は
-[waveview_design_format.md](waveview_design_format.md) に定義した。
-VCS でしかエラボレーションできない設計 (UVM・暗号化 IP 入りなど) では、これが
-正確なソース追跡への道になる。Verilator が通る設計なら `verilator --xml-only` で足りる。
+Verdi の KDB (vericom の `work.lib++`) や VCS の `simv.daidir` (`-kdb` 付き) も
+エラボレーション済みの設計データベースで、上の表の 2 行目と同じ精度になる。
+どちらも Synopsys の非公開バイナリ形式で、読めるのは Verdi の NPI (Novas Programming
+Interface) だけなので、waveview は `npi_export.py` を Verdi 同梱の Python
+(`$VERDI_HOME/platform/linux64/python-3.11`) と NPI ライブラリで動かして
+**design JSON に書き出し、それを読む**。`--rtl work.lib++` や `--rtl simv.daidir`
+と指定するだけで初回に自動で書き出し (`~/.cache/waveview/design/` にキャッシュ、
+KDB が更新されたら作り直す)、Open ダイアログの Browse… でも `▣ work.lib++` のように
+一覧に出て選べる。
+
+```sh
+vericom -sv -f filelist.f -top tb          # または vcs -kdb ...  → simv.daidir
+waveview.py serve w.fsdb --rtl work.lib++
+waveview.py serve build01:/work/sim/w.fsdb --rtl build01:/work/sim/work.lib++   # サーバの Verdi で書き出す
+npi_export.py work.lib++ -o design.json    # 手で書き出すとき
+```
+
+- 必要なもの: Verdi (`VERDI_HOME`、または PATH の `verdi`) と Verdi のライセンス
+  (`SNPSLMD_LICENSE_FILE`)。サーバのログイン環境に無ければ手元の
+  `WAVEVIEW_REMOTE_ENV="VERDI_HOME=... SNPSLMD_LICENSE_FILE=..."` で渡す
+- KDB から取るのは、ソースの文字列解析では確実に分からないもの:
+  エラボレーション後のインスタンスツリー (generate 展開済み、パラメータの組ごとに
+  モジュールを分ける)、各モジュールと宣言・代入文・インスタンス化の実際のファイルと行
+  (`` `include `` 先も含む)、ポートの向きと接続。読み出し位置 (loads) だけは
+  モジュール範囲のソース文字列から拾う
+- 形式は [waveview_design_format.md](waveview_design_format.md)。別のデータベースからの
+  exporter も同じ形式を書けばよい
+- VCS でしかエラボレーションできない設計 (UVM・暗号化 IP 入りなど) では、これが
+  正確なソース追跡への道になる。Verilator が通る設計なら `verilator --xml-only` で足りる
 
 AI からは同じことをテキストで行える:
 

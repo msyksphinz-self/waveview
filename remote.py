@@ -182,14 +182,27 @@ class Remote:
             k = nl + 1 + n
         return out
 
+    def put_file(self, path, data):
+        """Write data to path on the server (directories made as needed)."""
+        self.run("mkdir -p %s && cat > %s" % (shlex.quote(posixpath.dirname(path)), shlex.quote(path)), data=data)
+
     def index_rtl(self, specs, root):
         """Run rtlindex.py on the server over its own sources and get
         the design JSON back. Nothing needs to be installed there but
-        python3: the script is sent over ssh."""
+        python3: the script is sent over ssh. A Verdi KDB (work.lib++,
+        simv.daidir) is exported there through the server's Verdi, with
+        npi_export.py sent along."""
         with open(os.path.join(HERE, "rtlindex.py"), "rb") as fh:
             src = fh.read()
+        env = ""
+        if any(s.rstrip("/").endswith((".lib++", ".daidir")) for s in specs):
+            with open(os.path.join(HERE, "npi_export.py"), "rb") as fh:
+                exporter = fh.read()
+            # ssh commands start in the home directory: a relative path there
+            self.put_file(".cache/waveview/npi_export.py", exporter)
+            env = 'WAVEVIEW_NPI_EXPORT="$HOME/.cache/waveview/npi_export.py" '
         args = " ".join(shlex.quote(s) for s in specs)
-        cmd = "cd %s && python3 - %s -o /dev/stdout --quiet" % (shlex.quote(root), args)
+        cmd = "cd %s && %spython3 - %s -o /dev/stdout --quiet" % (shlex.quote(root), env, args)
         raw = self.run(cmd, data=src, timeout=1800)
         return json.loads(raw.decode(errors="replace"))
 

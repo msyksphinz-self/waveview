@@ -44,7 +44,8 @@ _LIST = r'''
 cd -- "$1" || exit 7
 pwd
 for f in *; do
-  if [ -d "$f" ]; then printf 'd 0 %s\n' "$f"
+  if [ -d "$f" ]; then
+    case "$2:$f" in rtl:*.lib++|rtl:*.daidir) printf 'b 0 %s\n' "$f";; *) printf 'd 0 %s\n' "$f";; esac
   elif [ -f "$f" ]; then
     if [ "$2" = rtl ]; then
       case "$f" in *.f|*.F|*.vc|*.flist|*.json|*.xml) printf 'f %s %s\n' "$(wc -c < "$f" | tr -d ' ')" "$f";; esac
@@ -122,8 +123,11 @@ def list_remote(host, path="", kind="dumps"):
     for line in lines[1:]:
         kind, _, rest = line.partition(" ")
         size, _, name = rest.partition(" ")
-        if kind in ("d", "f") and name:
-            entries.append({"name": name, "dir": kind == "d", "size": int(size or 0), "path": posixpath.join(cwd, name)})
+        if kind in ("d", "f", "b") and name:
+            e = {"name": name, "dir": kind != "f", "size": int(size or 0), "path": posixpath.join(cwd, name)}
+            if kind == "b":
+                e["db"] = True  # a Verdi KDB: chosen as a whole, not entered
+            entries.append(e)
     return _listing(cwd, posixpath.dirname(cwd) if cwd != "/" else None, entries)
 
 
@@ -141,7 +145,10 @@ def list_local(path="", kind="dumps"):
         for e in it:
             try:
                 if e.is_dir():
-                    entries.append({"name": e.name, "dir": True, "size": 0, "path": e.path})
+                    d = {"name": e.name, "dir": True, "size": 0, "path": e.path}
+                    if kind == "rtl" and e.name.endswith((".lib++", ".daidir")):
+                        d["db"] = True  # a Verdi KDB: chosen as a whole, not entered
+                    entries.append(d)
                 elif e.name.lower().endswith(KINDS[kind]):
                     entries.append({"name": e.name, "dir": False, "size": e.stat().st_size, "path": e.path})
             except OSError:

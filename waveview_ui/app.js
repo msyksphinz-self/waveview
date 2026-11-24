@@ -1815,14 +1815,15 @@ async function opList(host, path) {
     opRemember('host', host);
     for (const e of d.entries) {
       const row = document.createElement('div');
-      row.className = 'op-item' + (e.dir ? ' dir' : '');
+      row.className = 'op-item' + (e.dir && !e.db ? ' dir' : '') + (e.db ? ' db' : '');
       const name = document.createElement('span');
-      name.textContent = (e.dir ? '▸ ' : '') + e.name;
+      name.textContent = (e.db ? '▣ ' : e.dir ? '▸ ' : '') + e.name;
       const size = document.createElement('span');
       size.className = 'dim';
-      size.textContent = e.dir ? '' : opSize(e.size);
+      size.textContent = e.db ? 'Verdi KDB' : e.dir ? '' : opSize(e.size);
       row.append(name, size);
-      if (e.dir) row.onclick = () => opList(host, e.path);
+      if (e.db) row.onclick = () => opRtlChoose(e.path);
+      else if (e.dir) row.onclick = () => opList(host, e.path);
       else if (rtl) row.onclick = () => opRtlChoose(e.path);
       else {
         row.onclick = () => opPick(e, row);
@@ -1832,7 +1833,7 @@ async function opList(host, path) {
       $('op-list').append(row);
     }
     const files = d.entries.filter((e) => !e.dir).length;
-    if (rtl) opMsg(`${host || OP.local}: click a filelist (.f), a design .json / .xml, or press Use this folder` + (d.more ? ' (list cut short)' : ''));
+    if (rtl) opMsg(`${host || OP.local}: click a filelist (.f), a design .json / .xml, a Verdi KDB (work.lib++, simv.daidir), or press Use this folder` + (d.more ? ' (list cut short)' : ''));
     else opMsg(`${host || OP.local}: ${files} waveform file${files === 1 ? '' : 's'} here` + (d.more ? ' (list cut short)' : ''));
   } catch (err) {
     if (seq !== OP.seq) return;

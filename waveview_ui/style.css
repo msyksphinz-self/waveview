@@ -166,5 +166,6 @@ table.keys td { padding: 3px 14px 3px 0; }
 .op-item.sel { background: var(--sel); }
 .op-item.dir { color: var(--accent); }
 #opendlg.rtl-mode #op-list { border-color: var(--accent); }
+.op-item.db { color: var(--fg); font-weight: 600; }
 #op-msg { min-height: 1.3em; font-size: 12px; overflow-wrap: anywhere; max-height: 5em; overflow-y: auto; }
 #op-msg.bad { color: #e5534b; }

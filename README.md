@@ -13,7 +13,10 @@ AI agent use together, built for remote development.
 - **Source pane, Verdi nTrace style**: active annotation (values at the
   cursor next to every signal), double-click to trace drivers / loads across
   the hierarchy, into instances and up through ports; right-click a node of
-  the hierarchy tree to open its module or its instantiation
+  the hierarchy tree to open its module or its instantiation. The index comes
+  from the sources (heuristic), `verilator --xml-only`, or a Verdi KDB
+  (`--rtl work.lib++` / `simv.daidir`, exported through Verdi's NPI where
+  Verdi is installed, also on the build server over ssh)
 - **Huge dumps**: FST is read in place, on demand, by a small C helper
   (`fstsrv.c`); opening reads only the hierarchy, views fetch tiles of what is
   on screen, zoomed-out tiles are aggregated in C. A 3.6 GB FST opens in ms
@@ -134,7 +137,8 @@ the Verilator 5.040 sources for it. The result is `dist/waveview.app` and
 | `nameindex.py` | the names of a very large FSDB, looked up in an index on disk |
 | `remote.py` | ssh transport, remote build of `fstsrv` / `fsdbsrv`, remote RTL index |
 | `opener.py` | Open dialog backend: ssh hosts, directory listings, app window |
-| `rtlindex.py` | SystemVerilog index (heuristic, Verilator `--xml-only`, or design JSON) |
+| `rtlindex.py` | SystemVerilog index (heuristic, Verilator `--xml-only`, design JSON, or a Verdi KDB through `npi_export.py`) |
+| `npi_export.py` | Verdi KDB (`work.lib++`, `simv.daidir`) to design JSON, through Verdi's Python NPI |
 | `wave2img.py`, `fst2vcd_mini.c` | VCD parser; draws a timing diagram to SVG/PNG (needs matplotlib) |
 | `build_windows.sh` | builds the standalone `dist/waveview.exe` |
 | `build_macos.sh` | builds the standalone `dist/waveview.app` (and `dist/waveview`) |
