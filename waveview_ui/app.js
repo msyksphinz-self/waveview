@@ -545,7 +545,7 @@ async function treeMenu(e, k) {
 // their interface bundles, and the connections between them (/api/diagram)
 // ---------------------------------------------------------------------------
 
-const DG = { scope: null, data: null };
+const DG = { scope: null, data: null, mode: 'diagram', metric: 'signals', tree: null };
 const PROTO_COLOR = {
   'AXI4': '#4ea1ff', 'AXI4-Lite': '#7cc0ff', 'AXI4-Stream': '#2fbfa8', 'APB': '#4cb944', 'AHB': '#9bb43a',
   'CHI': '#a86ee8', 'TileLink': '#f0932b', 'Wishbone': '#b5651d', 'Avalon-MM': '#e06ca8',
@@ -553,8 +553,14 @@ const PROTO_COLOR = {
 };
 function protoColor(p) { return PROTO_COLOR[p] || '#8b929c'; }
 
-async function showDiagram(scope) {
-  if (scope === undefined || scope === null) scope = S.scope || '';
+async function showDiagram(scope, mode) {
+  if (scope === undefined || scope === null) scope = DG.scope !== null && $('diagdlg').open ? DG.scope : (S.scope || '');
+  if (mode) DG.mode = mode;
+  $('dg-m-diagram').classList.toggle('primary', DG.mode === 'diagram');
+  $('dg-m-treemap').classList.toggle('primary', DG.mode === 'treemap');
+  $('dg-metric').hidden = DG.mode !== 'treemap';
+  $('dg-ask').hidden = DG.mode === 'treemap';
+  if (DG.mode === 'treemap') return showTreemap(scope);
   let d;
   try { d = await api('/api/diagram?scope=' + encodeURIComponent(scope)); } catch (e) { toast(e.message); return; }
   DG.scope = d.scope; DG.data = d;
@@ -563,13 +569,20 @@ async function showDiagram(scope) {
   if (!$('diagdlg').open) $('diagdlg').show();
 }
 
-function renderDiagram(d) {
-  const svg = $('dg-svg');
-  svg.textContent = '';
-  // crumbs
+// -- treemap: the hierarchy below a scope, each scope as large as what it holds
+async function showTreemap(scope) {
+  let t;
+  try { t = await api('/api/tree?scope=' + encodeURIComponent(scope) + '&depth=4&limit=60'); } catch (e) { toast(e.message); return; }
+  DG.scope = scope; DG.tree = t;
+  if (!$('diagdlg').open) $('diagdlg').show();  // open first: the treemap fills the pane's real size
+  renderTreemap(t);
+}
+window.addEventListener('resize', () => { if ($('diagdlg').open && DG.mode === 'treemap' && DG.tree) renderTreemap(DG.tree); });
+
+function dgCrumbs(scope, module) {
   const crumbs = $('dg-crumbs');
   crumbs.textContent = '';
-  const comps = d.scope ? d.scope.split('.') : [];
+  const comps = scope ? scope.split('.') : [];
   const top = document.createElement('a'); top.textContent = '(top)'; top.onclick = () => showDiagram('');
   crumbs.append(top);
   comps.forEach((c, i) => {
@@ -579,8 +592,106 @@ function renderDiagram(d) {
     a.onclick = () => showDiagram(sc);
     crumbs.append(a);
   });
-  if (d.module) { const m = document.createElement('span'); m.className = 'mod'; m.textContent = '(' + d.module + ')'; crumbs.append(m); }
-  $('dg-up').disabled = !d.scope;
+  if (module) { const m = document.createElement('span'); m.className = 'mod'; m.textContent = '(' + module + ')'; crumbs.append(m); }
+  $('dg-up').disabled = !scope;
+}
+
+// squarified treemap: rows of rectangles whose aspect ratio stays near 1
+function squarify(items, x, y, w, h) {
+  const out = [];
+  const total = items.reduce((s, it) => s + it.value, 0);
+  if (!total || w <= 0 || h <= 0) return out;
+  let rest = items.slice();
+  let cx = x, cy = y, cw = w, ch = h, remaining = total;
+  while (rest.length) {
+    const horizontal = cw >= ch;  // lay a row along the shorter side
+    const side = horizontal ? ch : cw;
+    let row = [], rowSum = 0, worst = Infinity;
+    while (rest.length) {
+      const it = rest[0];
+      const sum = rowSum + it.value;
+      const area = (cw * ch) * sum / remaining;
+      const thick = area / side;
+      let wst = 0;
+      for (const r of row.concat([it])) { const len = (cw * ch) * r.value / remaining / thick; wst = Math.max(wst, thick / len, len / thick); }
+      if (row.length && wst > worst) break;
+      row.push(it); rowSum = sum; worst = wst; rest.shift();
+    }
+    const thick = (cw * ch) * rowSum / remaining / side;
+    let off = 0;
+    for (const r of row) {
+      const len = (cw * ch) * r.value / remaining / thick;
+      out.push(horizontal ? { it: r, x: cx, y: cy + off, w: thick, h: len } : { it: r, x: cx + off, y: cy, w: len, h: thick });
+      off += len;
+    }
+    if (horizontal) { cx += thick; cw -= thick; } else { cy += thick; ch -= thick; }
+    remaining -= rowSum;
+  }
+  return out;
+}
+
+function tmValue(n) {
+  if (DG.metric === 'scopes') return n.scopes + 1;
+  if (DG.metric === 'loc') return n.loc || (n.kids.length ? n.kids.reduce((s, k) => s + tmValue(k), 0) : 1);
+  return n.signals;
+}
+
+function tmColor(name, depth) {
+  let h = 0;
+  for (const c of (name || '')) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  const hue = h % 360;
+  return `hsl(${hue} 45% ${Math.max(22, 48 - depth * 7)}%)`;
+}
+
+function renderTreemap(t) {
+  const svg = $('dg-svg');
+  svg.textContent = '';
+  dgCrumbs(t.scope, t.module);
+  const box = $('dg-box');
+  const W = Math.max(600, box.clientWidth - 4), H = Math.max(400, box.clientHeight - 4);
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('width', W); svg.setAttribute('height', H);
+  const NS = 'http://www.w3.org/2000/svg';
+  const el = (tag, attrs, parent) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); (parent || svg).appendChild(e); return e; };
+  const fmt = (n) => n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(n);
+  const metricName = { signals: 'sig', scopes: 'scopes', loc: 'lines' }[DG.metric];
+  $('dg-msg').textContent = `${fmt(t.signals)} signals · ${t.scopes} scopes below${t.module ? ' · ' + t.module : ''}`;
+  const draw = (node, x, y, w, h, depth, parent) => {
+    const items = node.kids.map((k) => ({ value: Math.max(tmValue(k), 1e-9), node: k })).filter((it) => it.value > 0);
+    const pad = depth === 0 ? 0 : 3, head = depth === 0 ? 0 : (h > 34 && w > 60 ? 16 : 0);
+    const inner = { x: x + pad, y: y + pad + head, w: w - 2 * pad, h: h - 2 * pad - head };
+    if (!items.length || inner.w < 8 || inner.h < 8) return;
+    for (const r of squarify(items, inner.x, inner.y, inner.w, inner.h)) {
+      const k = r.it.node;
+      const leaf = !k.kids.length || r.w < 40 || r.h < 30;
+      const g = el('g', { class: 'tm ' + (leaf ? 'leaf' : 'branch') + (k.scope && k.scope === S.scope ? ' on' : '') }, parent);
+      el('rect', { x: r.x, y: r.y, width: r.w, height: r.h, fill: tmColor(k.module || k.name, depth) }, g);
+      const label = k.name + (k.module && k.module !== k.name ? ' · ' + k.module : '');
+      const sub = `${fmt(k.signals)} sig · ${k.scopes} scopes${k.loc ? ' · ' + fmt(k.loc) + ' lines' : ''}`;
+      if (r.w > 50 && r.h > 16) {
+        const tx = el('text', { x: r.x + 5, y: r.y + 13 }, g); tx.textContent = label.length > r.w / 6.5 ? label.slice(0, Math.max(3, r.w / 6.5 - 1)) + '…' : label;
+        if (r.h > 30 && !(!leaf && r.h > 34)) { const t2 = el('text', { x: r.x + 5, y: r.y + 26, class: 'sub' }, g); t2.textContent = sub; }
+        else if (!leaf && r.w > 120) { const t2 = el('text', { x: r.x + r.w - 5, y: r.y + 13, class: 'sub', 'text-anchor': 'end' }, g); t2.textContent = sub; }
+      }
+      const title = el('title', {}, g); title.textContent = `${k.scope || k.name}\n${sub}${k.module ? '\nmodule ' + k.module : ''}`;
+      if (k.scope) {
+        g.querySelector('rect').addEventListener('click', (e) => { e.stopPropagation(); if (leaf || e.altKey) { S.scope = k.scope; S.pick.clear(); renderTree(); renderSigList(); showTreemap(k.scope); } else { S.scope = k.scope; S.pick.clear(); renderTree(); renderSigList(); showTreemap(k.scope); } });
+        g.querySelector('rect').addEventListener('dblclick', (e) => { e.stopPropagation(); showDiagram(k.scope, 'diagram'); });
+        g.querySelector('rect').addEventListener('contextmenu', (e) => treeMenu(e, { path: k.scope, name: k.name }));
+      }
+      if (!leaf) draw(k, r.x, r.y, r.w, r.h, depth + 1, g);
+    }
+  };
+  draw(t, 0, 0, W, H, 0, svg);
+}
+
+$('dg-m-diagram').onclick = () => showDiagram(DG.scope, 'diagram');
+$('dg-m-treemap').onclick = () => showDiagram(DG.scope, 'treemap');
+$('dg-metric').onchange = () => { DG.metric = $('dg-metric').value; if (DG.tree) renderTreemap(DG.tree); };
+
+function renderDiagram(d) {
+  const svg = $('dg-svg');
+  svg.textContent = '';
+  dgCrumbs(d.scope, d.module);
   $('dg-msg').textContent = d.index ? `${d.boxes.length} instances · ${d.edges.length} connections` : `${d.boxes.length} scopes · no source index, so no connections (start with --rtl or choose the RTL in Open…)`;
 
   // nodes: the boxes, plus the scope's own ports as an entry and an exit node
@@ -2208,7 +2319,7 @@ $('opendlg').addEventListener('cancel', (e) => { if (!OP.hasDump) e.preventDefau
   if (!session.dump) { setPill('st-conn', 'no waveform open', ''); showOpen(); return; }
   await loadSignals();
   connect();
-  // a deep link: #diagram or #diagram=scope opens the block diagram at once
-  const m = /^#diagram(?:=(.*))?$/.exec(location.hash);
-  if (m) showDiagram(m[1] ? decodeURIComponent(m[1]) : (S.scope || ''));
+  // a deep link: #diagram / #treemap, with =scope, opens it at once
+  const m = /^#(diagram|treemap)(?:=(.*))?$/.exec(location.hash);
+  if (m) showDiagram(m[2] ? decodeURIComponent(m[2]) : (S.scope || ''), m[1]);
 })();

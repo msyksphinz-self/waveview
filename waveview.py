@@ -1065,6 +1065,90 @@ class Hub:
                                if bd["protocol"] is None and not bd["label"]]
                 + ["/" + bd["name"] for bd in ports if bd["protocol"] is None and not bd["label"]]}
 
+    # -- the whole hierarchy by size (treemap) -------------------------------
+
+    def scope_tree(self):
+        """Every scope of the dump with the number of signals below it,
+        built once per dump generation. A dump whose names live on disk
+        (nameindex) uses the per-scope counts the server summarised."""
+        cached = getattr(self, "_scope_tree", None)
+        if cached is not None and cached[0] == self.gen:
+            return cached[1]
+        root = {"name": "", "scope": "", "signals": 0, "kids": {}}
+
+        def node_for(comps):
+            node = root
+            node["signals"] += 1
+            path = ""
+            for c in comps:
+                path = path + "." + c if path else c
+                node = node["kids"].setdefault(c, {"name": c, "scope": path, "signals": 0, "kids": {}})
+                node["signals"] += 1
+            return node
+
+        names = getattr(self.wave, "names", None)
+        counts = getattr(names, "meta", {}).get("scopes") if names is not None else None
+        if counts:
+            for scope, n in counts.items():
+                node = node_for(scope.split("."))
+                node["signals"] += n - 1
+                for anc in self._ancestors(root, scope.split(".")):
+                    anc["signals"] += n - 1
+        else:
+            for s in self.wave.signals:
+                node_for(s.name.split(".")[:-1])
+        self._scope_tree = (self.gen, root)
+        return root
+
+    @staticmethod
+    def _ancestors(root, comps):
+        out = [root]
+        node = root
+        for c in comps[:-1]:
+            node = node["kids"].get(c)
+            if node is None:
+                break
+            out.append(node)
+        return out
+
+    def tree(self, scope, depth=3, limit=40):
+        """The subtree below `scope` for a treemap: each node with its
+        signals, descendant scopes, module and lines (from the index), its
+        children cut to the `limit` largest plus a remainder."""
+        root = self.scope_tree()
+        node = root
+        for c in (scope or "").strip(".").split("."):
+            if not c:
+                continue
+            node = node["kids"].get(c)
+            if node is None:
+                raise wq.QueryError("no scope %s in the dump" % scope)
+        idx = self.src
+
+        def count_scopes(n):
+            return sum(1 + count_scopes(k) for k in n["kids"].values())
+
+        def out(n, d):
+            o = {"name": n["name"], "scope": n["scope"], "signals": n["signals"], "scopes": count_scopes(n),
+                 "module": None, "loc": None, "kids": []}
+            if idx is not None and n["scope"]:
+                m, rest = idx.resolve_scope(n["scope"])
+                if m is not None and not rest:
+                    o["module"] = m.orig
+                    o["loc"] = m.end_line - m.line + 1
+                    o["iface"] = m.kind == "interface"
+            if d > 0 and n["kids"]:
+                kids = sorted(n["kids"].values(), key=lambda k: -k["signals"])
+                o["kids"] = [out(k, d - 1) for k in kids[:limit]]
+                rest = kids[limit:]
+                if rest:
+                    o["kids"].append({"name": "+%d more" % len(rest), "scope": None, "signals": sum(k["signals"] for k in rest),
+                                      "scopes": sum(1 + count_scopes(k) for k in rest), "module": None, "loc": None,
+                                      "kids": []})
+            return o
+
+        return out(node, depth)
+
     def _iface_bundle(self, idx, iface, modport, port, widths, ibox):
         """An interface port as one bundle: the protocol from the interface's
         signal names, the role from the modport's directions, the width from
@@ -1452,6 +1536,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if path == "/api/diagram":
                 with hub.lock:
                     return self._send(200, hub.diagram(query.get("scope", [""])[0]))
+            if path == "/api/tree":
+                with hub.lock:
+                    return self._send(200, hub.tree(query.get("scope", [""])[0],
+                                                    int(query.get("depth", ["3"])[0]),
+                                                    int(query.get("limit", ["40"])[0])))
             if path == "/api/src/status":
                 return self._send(200, {"status": hub.src_status, "ready": hub.src is not None})
             if path == "/api/src/trace":
@@ -1864,6 +1953,22 @@ def print_snapshot(snap, radix="hex"):
             print("  " + line)
 
 
+def print_tree(t):
+    """The hierarchy by size as an indented list: signals below each scope,
+    scopes below it, the module and its lines."""
+    total = max(1, t["signals"])
+
+    def line(n, depth):
+        size = "%7d sig %5.1f%%  %4d scopes" % (n["signals"], 100.0 * n["signals"] / total, n["scopes"])
+        mod = ("  (%s%s%s)" % (n["module"], ", %d lines" % n["loc"] if n["loc"] else "", ", interface" if n.get("iface") else "")
+               if n["module"] else "")
+        print("%s %s%s%s" % (size, "  " * depth, n["name"] or "(top)", mod))
+        for k in n["kids"]:
+            line(k, depth + 1)
+
+    line(t, 0)
+
+
 def print_diagram(d):
     """The block diagram as text, for a terminal or an agent."""
 
@@ -2048,6 +2153,12 @@ def run_client(args):
         print_diagram(d)
     elif args.cmd == "label":
         show(c.cmd("label", scope=args.scope, bundle=args.bundle, text=" ".join(args.text), clear=args.clear or None))
+    elif args.cmd == "tree":
+        t = c.call("/api/tree?scope=%s&depth=%d&limit=%d" % (urllib.parse.quote(args.scope), args.depth, args.limit))
+        if j:
+            print(json.dumps(t))
+            return 0
+        print_tree(t)
     elif args.cmd == "src":
         name = args.signal
         info = c.call("/api/src/signal?name=" + urllib.parse.quote(_full_name(c, name)))
@@ -2206,6 +2317,12 @@ def run_selftest():
           any(b["signals"] == ["clk"] for b in dg["ports"])
           and any(e["from"] == "" and e["to"] == "u_leaf" for e in dg["edges"]))
     check("diagram: the top without an index", hub2.diagram("")["boxes"][0]["name"] == "TOP")
+    tr = hub2.tree("", depth=3)
+    top_node = tr["kids"][0]["kids"][0] if tr["kids"] and tr["kids"][0]["kids"] else {}
+    check("tree: signals and scopes counted below each scope",
+          tr["signals"] == 5 and tr["scopes"] == 3 and top_node.get("name") == "top" and top_node.get("signals") == 5
+          and top_node.get("module") == "top" and top_node["kids"][0]["name"] == "u_leaf" and top_node["kids"][0]["signals"] == 2)
+    check("tree: a subtree and its limit", hub2.tree("TOP.top", depth=1, limit=0)["kids"][0]["name"] == "+1 more")
     unnamed = dg["unlabelled"]
     hub2.apply("label", {"scope": "TOP.top", "bundle": unnamed[0], "text": "test bus"}, source="agent")
     dg2 = hub2.diagram("TOP.top")
@@ -2556,6 +2673,11 @@ def build_parser():
     s.add_argument("bundle", help="box/bundle as `diagram` lists it (u_cpu/dbg), or /bundle for the scope's ports")
     s.add_argument("text", nargs="*", help="what it is, e.g. 'debug trace port'; none with --clear removes it")
     s.add_argument("--clear", action="store_true")
+    s = sub.add_parser("tree", parents=[client],
+                       help="the hierarchy by size: signals and scopes below each scope, module and lines")
+    s.add_argument("scope", nargs="?", default="", help="dump scope to start from (default: the top)")
+    s.add_argument("--depth", type=int, default=3, help="levels to show (default 3)")
+    s.add_argument("--limit", type=int, default=40, help="largest children shown per scope (default 40)")
     return p
 
 

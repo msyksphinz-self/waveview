@@ -114,6 +114,8 @@
 <dialog id="diagdlg">
   <div id="dg-head">
     <button id="dg-up" title="Parent scope">↑</button>
+    <span id="dg-mode"><button id="dg-m-diagram" class="primary" title="Instances, interfaces and connections of the scope">Diagram</button><button id="dg-m-treemap" title="The whole hierarchy below the scope, each scope as large as what it holds">Treemap</button></span>
+    <select id="dg-metric" hidden title="What the area shows"><option value="signals">area: signals</option><option value="scopes">area: scopes</option><option value="loc">area: lines of source</option></select>
     <span id="dg-crumbs"></span>
     <span id="dg-msg" class="dim"></span>
     <span class="grow"></span>
@@ -121,7 +123,7 @@
     <button id="dg-close" title="Close (Esc)">×</button>
   </div>
   <div id="dg-box"><svg id="dg-svg" xmlns="http://www.w3.org/2000/svg"></svg></div>
-  <div id="dg-foot" class="dim">Click a box: select its scope · double-click: go inside · right-click: its source · click a connection: add its signals · right-click an interface: name it, ask the AI, add its signals</div>
+  <div id="dg-foot" class="dim">Diagram — click a box: select its scope · double-click: go inside · right-click: its source · click a connection: add its signals · right-click an interface: name it, ask the AI, add its signals.&nbsp; Treemap — click: zoom in · double-click: its diagram · right-click: its source</div>
 </dialog>
 
 <dialog id="helpdlg">

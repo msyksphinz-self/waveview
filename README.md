@@ -10,6 +10,9 @@ AI agent use together, built for remote development.
   (`waveview.py add / goto / marker / annotate / note / find / look / src`)
   drives the same screen the person sees, and "Send to AI" hands the agent a
   message plus the current view
+- **Treemap of the hierarchy**: every scope as an area proportional to its
+  signals (or scopes, or lines of source), nested, same module same colour;
+  click to zoom, double-click for its diagram. `waveview.py tree` as text
 - **Block diagram of a scope**: instances as boxes sized by what they hold,
   their interfaces bundled with the protocol told from the signal names
   (AXI4 / AXI4-Lite / AXI4-Stream, APB, AHB, CHI, TileLink, Wishbone,

@@ -176,6 +176,15 @@ table.keys td { padding: 3px 14px 3px 0; }
 #dg-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 #dg-head .grow { flex: 1; }
 #dg-crumbs a { cursor: pointer; color: var(--accent); }
+#dg-mode button { border-radius: 0; margin-right: -1px; }
+#dg-mode button:first-child { border-radius: 4px 0 0 4px; }
+#dg-mode button:last-child { border-radius: 0 4px 4px 0; }
+#dg-metric { background: var(--panel2); color: var(--fg); border: 1px solid var(--line); border-radius: 4px; padding: 3px 5px; }
+#dg-svg .tm rect { stroke: var(--wbg); stroke-width: 1.5; cursor: pointer; }
+#dg-svg .tm.leaf rect:hover, #dg-svg .tm.branch > rect:hover { stroke: var(--accent); stroke-width: 2; }
+#dg-svg .tm text { pointer-events: none; fill: #fff; paint-order: stroke; stroke: rgba(0,0,0,.45); stroke-width: 2.5px; }
+#dg-svg .tm text.sub { font-size: 10px; opacity: .9; }
+#dg-svg .tm.on > rect { stroke: #fff; stroke-width: 3; }
 #dg-crumbs .mod { color: var(--dim); margin-left: 6px; }
 #dg-box { flex: 1; overflow: auto; background: var(--wbg); border: 1px solid var(--line); border-radius: 4px; }
 #dg-foot { font-size: 11px; margin-top: 6px; }

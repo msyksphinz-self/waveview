@@ -111,9 +111,15 @@ When asked for a debug view of a failure without a viewer running, write the
 ## The shape of a scope: block diagram
 
 ```sh
+waveview.py tree                       # the hierarchy by size: signals and scopes below each scope, 3 levels
+waveview.py tree u_soc --depth 2       # from a scope
 waveview.py diagram u_soc              # instances with their size and interfaces, and who connects to whom
 waveview.py diagram u_soc --json       # the same for a program
 ```
+
+`tree` is the first look at an unfamiliar design: where the bulk is, what
+repeats (same module, same size), what is tiny. The user sees it as a
+treemap (Diagram → Treemap).
 
 Each box is an instance (signals, sub-instances, lines of source), its
 interfaces are bundles of signals with the protocol told from the names (AXI4
