@@ -64,7 +64,7 @@ function connect() {
   es.addEventListener('reload', (ev) => {
     S.meta = JSON.parse(ev.data);
     T.cache.clear(); T.inflight.clear(); S.edges = null;
-    loadSignals().then(() => { requestData(); fetchValues(); });
+    loadSignals().then(() => { requestData(); fetchValues(); watchIndex(); });
     toast('Dump reloaded from disk');
   });
   es.addEventListener('reopen', () => location.reload());
@@ -461,6 +461,27 @@ function renderStatus() {
 }
 
 function setPill(id, text, cls) { const e = $(id); e.textContent = text; e.className = 'pill ' + cls; }
+
+// the source index being built shows in the status bar until it is ready
+let srcWatch = null;
+function watchIndex() {
+  if (srcWatch) return;
+  const tick = async () => {
+    let r;
+    try { r = await api('/api/src/status'); } catch (e) { srcWatch = null; return; }
+    const st = r.status || '';
+    const pill = $('st-src');
+    if (r.ready) {
+      pill.hidden = true; srcWatch = null;
+      if (st && !st.startsWith('not indexed')) toast('source index ready: ' + st);
+      return;
+    }
+    if (st.startsWith('indexing')) { pill.hidden = false; setPill('st-src', 'source: ' + st, 'busy'); srcWatch = setTimeout(tick, 1500); return; }
+    if (st.startsWith('index failed')) { pill.hidden = false; setPill('st-src', 'source: ' + st, 'bad'); pill.title = st; srcWatch = null; return; }
+    pill.hidden = true; srcWatch = null;  // not indexed: nothing to wait for
+  };
+  srcWatch = setTimeout(tick, 300);
+}
 
 let toastTimer = null;
 function toast(msg) {
@@ -2319,6 +2340,7 @@ $('opendlg').addEventListener('cancel', (e) => { if (!OP.hasDump) e.preventDefau
   if (!session.dump) { setPill('st-conn', 'no waveform open', ''); showOpen(); return; }
   await loadSignals();
   connect();
+  watchIndex();
   // a deep link: #diagram / #treemap, with =scope, opens it at once
   const m = /^#(diagram|treemap)(?:=(.*))?$/.exec(location.hash);
   if (m) showDiagram(m[2] ? decodeURIComponent(m[2]) : (S.scope || ''), m[1]);

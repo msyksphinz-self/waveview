@@ -737,7 +737,12 @@ class Hub:
                                             and "/obj_dir" not in f)
                     kept.incdirs = files.incdirs
                     files = kept
-                idx = rtlindex.Index(files)
+                total = len(files)
+
+                def progress(done, path):
+                    self.src_status = "indexing %d/%d files, %.0f s" % (done, total, time.time() - t0)
+
+                idx = rtlindex.Index(files, progress=progress)
                 files = list(files) + [f for f in idx.files if f not in files]  # `include files are watched too
         except Exception as exc:  # noqa: BLE001
             self.src_status = "index failed: %s" % exc
@@ -766,6 +771,7 @@ class Hub:
         r = parsed[0][0]
         paths = [p for _, p in parsed]
         root = self.rtl_root or __import__("posixpath").dirname(paths[0])
+        self.src_status = "indexing on %s" % r.host
         doc = r.index_rtl(paths, root)
         idx = rtlindex.Index.from_doc(doc)
         rroot = doc.get("root") or root
@@ -799,8 +805,13 @@ class Hub:
     def index(self):
         """The source index, rebuilt when a source file changed."""
         if self.src is None:
-            raise wq.QueryError("no source index (%s). Start the viewer with --rtl <filelist.f or dir>"
-                                % self.src_status)
+            st = self.src_status
+            if st.startswith("indexing"):
+                raise wq.QueryError("the source index is still being built (%s); try again in a moment" % st)
+            if st.startswith("index failed"):
+                raise wq.QueryError("the source index could not be built: %s" % st[len("index failed"):].strip(": "))
+            raise wq.QueryError("no source index (%s). Start the viewer with --rtl <filelist.f or dir>, "
+                                "or choose the RTL in Open…" % st)
         now = time.time()
         if now - self.src_checked > 2:
             self.src_checked = now

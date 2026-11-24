@@ -93,6 +93,7 @@ input:focus, textarea:focus { border-color: var(--accent); }
 .pill { padding: 0 7px; border-radius: 9px; border: 1px solid var(--line); }
 .pill.ok { color: var(--wave); border-color: var(--wave); }
 .pill.bad { color: var(--wx); border-color: var(--wx); }
+.pill.busy { color: var(--accent); border-color: var(--accent); }
 .pill.ai { color: var(--ann); border-color: var(--ann); }
 #st-last.flash { color: var(--ann); }
 

@@ -104,6 +104,41 @@ def find_include(name, from_file, incdirs):
     return None
 
 
+_INCLUDE_CACHE = {}  # abs path -> (mtime, size, tokens): a header every module includes is read once
+
+
+def _include_tokens(inc, incdirs, included, label, chain):
+    """The tokens of an included file, from a cache keyed on the file's
+    mtime and size (its own `includes expanded, their files labelled). None
+    when it cannot be read."""
+    try:
+        st = os.stat(inc)
+        key = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+    hit = _INCLUDE_CACHE.get(inc)
+    if hit is not None and hit[0] == key:
+        for p, n in hit[2]:
+            if included is not None and all(q != p for q, _ in included):
+                included.append((p, n))
+        return hit[1]
+    try:
+        with open(inc, errors="replace") as fh:
+            itext = fh.read()
+    except OSError:
+        return None
+    nested = []
+    toks = tokenize(itext, inc, incdirs, nested, label, chain)
+    if len(_INCLUDE_CACHE) > 512:
+        _INCLUDE_CACHE.clear()
+    _INCLUDE_CACHE[inc] = (key, toks, nested)
+    if included is not None:
+        for p, n in nested:
+            if all(q != p for q, _ in included):
+                included.append((p, n))
+    return toks
+
+
 def tokenize(text, path=None, incdirs=(), included=None, label=None, _chain=()):
     """Tokens with 1-based line and 0-based column. Comments and directive
     lines are dropped (both branches of `ifdef stay). An `include is
@@ -139,21 +174,13 @@ def tokenize(text, path=None, incdirs=(), included=None, label=None, _chain=()):
                 arg = re.match(r'[ \t]*"([^"\n]+)"', text[m.end():])
                 inc = find_include(arg.group(1), path, incdirs) if arg else None
                 if inc and inc not in _chain and inc != (os.path.abspath(path) if path else None):
-                    try:
-                        with open(inc, errors="replace") as fh:
-                            itext = fh.read()
-                    except OSError:
-                        itext = None
-                    if itext is not None:
+                    sub = _include_tokens(inc, incdirs, included, label,
+                                          _chain + ((os.path.abspath(path),) if path else ()) + (inc,))
+                    if sub is not None:
                         name = label(inc) if label else inc
                         if included is not None and all(p != inc for p, _ in included):
                             included.append((inc, name))
-                        sub = tokenize(itext, inc, incdirs, included, label,
-                                       _chain + ((os.path.abspath(path),) if path else ()) + (inc,))
-                        for t in sub:
-                            if t.file is None:
-                                t.file = name
-                        out += sub
+                        out += [Tok(t.kind, t.text, t.line, t.col, t.file or name) for t in sub]
             continue
         if skip_line == line:
             continue
@@ -768,7 +795,8 @@ class Index:
     an exporter on top of Verdi's NPI reading a KDB or simv.daidir) can
     write. save_json() writes that format."""
 
-    def __init__(self, files=(), root=None, producer="rtlindex", incdirs=None):
+    def __init__(self, files=(), root=None, producer="rtlindex", incdirs=None, progress=None):
+        """progress(done, path) is called after each file, for a status."""
         self.root = os.path.abspath(root or os.getcwd())
         self.modules = {}
         self.files = list(files)
@@ -781,7 +809,9 @@ class Index:
         for f in files:
             if f.endswith((".svh", ".vh")) and os.path.dirname(os.path.abspath(f)) not in self.incdirs:
                 self.incdirs.append(os.path.dirname(os.path.abspath(f)))
-        for f in files:
+        for k, f in enumerate(files):
+            if progress is not None and (k % 20 == 0 or k == len(files) - 1):
+                progress(k, f)
             try:
                 with open(f, errors="replace") as fh:
                     text = fh.read()
