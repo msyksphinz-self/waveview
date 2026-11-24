@@ -136,6 +136,7 @@ class Hub:
             "arrows": [],  # [{from: {signal, time}, to: {signal, time}, label, color}]
             "comments": [],  # [{signal, time, text, color}]; signal None: on the time axis
             "source": None,  # {scope, line, signal, kind} shown in the source pane
+            "iflabels": {},  # names given to interface bundles of the diagram: {scope: {"box/bundle": {text, source}}}
             "last": None,  # {op, source, client, at}
         }
         self.tiles = collections.OrderedDict()
@@ -175,7 +176,7 @@ class Hub:
         except (OSError, ValueError):
             return
         for k in ("signals", "cursor", "marker", "view", "clock", "annotations", "note",
-                  "cursors", "arrows", "comments"):
+                  "cursors", "arrows", "comments", "iflabels"):
             if k in saved:
                 self.state[k] = saved[k]
 
@@ -1001,9 +1002,21 @@ class Hub:
                                                    "role": bd["role"] if bd else None, "width": 0, "nets": []})
                         e["width"] += widths.get(net, widths.get(di + "." + dp, 1))
                         e["nets"].append([dp, net, sp])
+        # names given by a person or an agent (op_label), on bundles and their edges
+        labels = self.state.get("iflabels", {}).get(scope, {})
+        for b in boxes.values():
+            for bd in b["bundles"]:
+                bd["label"] = (labels.get(b["name"] + "/" + bd["name"]) or {}).get("text")
+        for bd in ports:
+            bd["label"] = (labels.get("/" + bd["name"]) or {}).get("text")
+        for e in edges.values():
+            e["label"] = (labels.get(e["from"] + "/" + e["bundle"]) or {}).get("text")
         return {"scope": scope, "module": mod.orig if mod else None, "index": idx is not None,
                 "boxes": sorted(boxes.values(), key=lambda b: (-b["signals"], b["name"])),
-                "ports": ports, "edges": list(edges.values())}
+                "ports": ports, "edges": list(edges.values()),
+                "unlabelled": [(b["name"] + "/" + bd["name"]) for b in boxes.values() for bd in b["bundles"]
+                               if bd["protocol"] is None and not bd["label"]]
+                + ["/" + bd["name"] for bd in ports if bd["protocol"] is None and not bd["label"]]}
 
     def src_where(self, scope):
         """For a node of the hierarchy: the module that implements it (file
@@ -1056,6 +1069,26 @@ class Hub:
             self.state["source"] = {"scope": a["scope"], "line": a.get("line"), "signal": a.get("name"),
                                     "file": a.get("file"), "kind": a.get("kind"), "at": time.time()}
         return self.state["source"]
+
+    def op_label(self, a):
+        """Name an interface bundle of the diagram: scope, bundle as
+        "box/bundle" ("/bundle" for the scope's own ports), text (none or
+        clear: remove). What the names did not tell, a person or an agent
+        says here; kept with the view."""
+        scope = (a.get("scope") or "").strip(".")
+        key = a.get("bundle") or ""
+        if "/" not in key:
+            raise wq.QueryError("bundle must be box/bundle, e.g. u_cpu/dbg or /apb for the scope's ports")
+        labels = self.state.setdefault("iflabels", {})
+        text = (a.get("text") or "").strip()
+        if a.get("clear") or not text:
+            if scope in labels:
+                labels[scope].pop(key, None)
+                if not labels[scope]:
+                    del labels[scope]
+            return {"cleared": key}
+        labels.setdefault(scope, {})[key] = {"text": text, "source": a.get("source", "agent"), "at": time.time()}
+        return {"labelled": key}
 
     def op_ask(self, a):
         """A message from the person in the browser to the agent."""
@@ -1774,6 +1807,8 @@ def print_diagram(d):
         tag = b["protocol"] or "?"
         if b["role"]:
             tag += " " + b["role"]
+        if b.get("label"):
+            tag = '"%s"' % b["label"] + (", " + tag if b["protocol"] else "")
         name = b["name"] if not (b["protocol"] and b["name"].lower() == b["protocol"].lower()) else ""
         return "%s[%s, %d bits, %d signals%s]" % (name + " " if name else "", tag, b["width"], len(b["signals"]),
                                                   ", " + b["dir"] if b["dir"] else "")
@@ -1794,8 +1829,14 @@ def print_diagram(d):
         tag = e["protocol"] or "?"
         if e["role"]:
             tag += " " + e["role"]
+        if e.get("label"):
+            tag = '"%s"' % e["label"] + (", " + tag if e["protocol"] else "")
         print("edge    %s -> %s  %s [%s, %d bits, %d nets]" % (e["from"] or "(ports)", e["to"] or "(ports)",
                                                             e["bundle"], tag, e["width"], len(e["nets"])))
+    if d.get("unlabelled"):
+        print("unnamed %s" % ", ".join(d["unlabelled"]))
+        print("        (name one: waveview.py label %s <box/bundle> \"what it is\"; its signals: diagram --json)"
+              % (d["scope"] or "''"))
 
 
 def _full_name(c, name):
@@ -1941,6 +1982,8 @@ def run_client(args):
             print(json.dumps(d))
             return 0
         print_diagram(d)
+    elif args.cmd == "label":
+        show(c.cmd("label", scope=args.scope, bundle=args.bundle, text=" ".join(args.text), clear=args.clear or None))
     elif args.cmd == "src":
         name = args.signal
         info = c.call("/api/src/signal?name=" + urllib.parse.quote(_full_name(c, name)))
@@ -2099,6 +2142,14 @@ def run_selftest():
           any(b["signals"] == ["clk"] for b in dg["ports"])
           and any(e["from"] == "" and e["to"] == "u_leaf" for e in dg["edges"]))
     check("diagram: the top without an index", hub2.diagram("")["boxes"][0]["name"] == "TOP")
+    unnamed = dg["unlabelled"]
+    hub2.apply("label", {"scope": "TOP.top", "bundle": unnamed[0], "text": "test bus"}, source="agent")
+    dg2 = hub2.diagram("TOP.top")
+    labelled = [bd for b in dg2["boxes"] for bd in b["bundles"] if bd.get("label")] + [bd for bd in dg2["ports"] if bd.get("label")]
+    check("diagram: a label names an unidentified bundle", unnamed and labelled and labelled[0]["label"] == "test bus"
+          and unnamed[0] not in dg2["unlabelled"])
+    hub2.apply("label", {"scope": "TOP.top", "bundle": unnamed[0], "clear": True})
+    check("diagram: label cleared", unnamed[0] in hub2.diagram("TOP.top")["unlabelled"])
     # a filelist without the testbench: the DUT's scope is named after no module
     vcd_tb = os.path.join(tmp, "tb.vcd")
     with open(vcd_tb, "w") as fh:
@@ -2408,6 +2459,12 @@ def build_parser():
                        help="block diagram of a scope as text: instances with their size and interfaces "
                             "(AXI, APB, CHI... told from the names), and the connections between them")
     s.add_argument("scope", nargs="?", default="", help="dump scope (default: the top)")
+    s = sub.add_parser("label", parents=[client],
+                       help="name an interface bundle of the diagram that the signal names did not identify")
+    s.add_argument("scope", help="dump scope of the diagram ('' for the top)")
+    s.add_argument("bundle", help="box/bundle as `diagram` lists it (u_cpu/dbg), or /bundle for the scope's ports")
+    s.add_argument("text", nargs="*", help="what it is, e.g. 'debug trace port'; none with --clear removes it")
+    s.add_argument("--clear", action="store_true")
     return p
 
 

@@ -118,11 +118,26 @@ waveview.py diagram u_soc --json       # the same for a program
 Each box is an instance (signals, sub-instances, lines of source), its
 interfaces are bundles of signals with the protocol told from the names (AXI4
 master, APB completer, AXI4-Stream source, CHI requester...), and the edges
-say which instance drives which through what bundle. Bundles tagged `?` are
-the ones the names did not identify: say what they are to the user when you
-can tell from the signals or the source. The user sees the same picture with
-the Diagram button (D); a connection clicked there adds its signals to the
-waveform.
+say which instance drives which through what bundle. The user sees the same
+picture with the Diagram button (D); a connection clicked there adds its
+signals to the waveform.
+
+Bundles tagged `?` are the ones the names did not identify (`unnamed` lists
+them as `box/bundle`). Name them: look at their signals (`diagram --json`,
+or `wavequery.py list`) and the source (`src`), decide what the interface is
+(a bus protocol under other names, a custom request/response interface, a
+group of status or debug signals...), then
+
+```sh
+waveview.py label u_soc u_cpu/dbg "debug trace: 2x4-bit sample outputs"
+waveview.py label u_soc /cfg "register file access from the testbench"   # the scope's own ports
+```
+
+The name shows in the diagram at once and is kept with the view. When the
+user presses "Ask AI to name interfaces", the message in `inbox` lists the
+bundles and their signals: answer with `label` commands, one per bundle, and
+a short note on anything that looks like a known protocol under unusual
+names.
 
 ## From a waveform value to the RTL that made it
 

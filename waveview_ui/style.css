@@ -188,8 +188,10 @@ table.keys td { padding: 3px 14px 3px 0; }
 #dg-svg .box text { fill: var(--fg); pointer-events: none; }
 #dg-svg .box text.dim { fill: var(--dim); font-size: 11px; }
 #dg-svg .box text.name { font-weight: 600; }
-#dg-svg .stub { fill: var(--dim); font-size: 10px; pointer-events: none; }
+#dg-svg .stub { fill: var(--dim); font-size: 10px; cursor: context-menu; }
 #dg-svg .stub.proto { fill: var(--fg); }
+#dg-svg .stub.unknown { font-style: italic; }
+#dg-svg .stub:hover { fill: var(--accent); }
 #dg-svg .edge path { fill: none; cursor: pointer; opacity: .85; }
 #dg-svg .edge:hover path { opacity: 1; stroke-width: 6 !important; }
 #dg-svg .edge.plumbing path { stroke-dasharray: 3 4; opacity: .45; }

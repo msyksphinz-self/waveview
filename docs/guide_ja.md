@@ -322,8 +322,12 @@ Python も Verilator も C コンパイラも要らない。ダブルクリッ�
 - 箱クリックでそのスコープを選択、ダブルクリックで中へ、右クリックでモジュール
   定義 / インスタンス化箇所へ (ソースペイン)。線をクリックするとその束の信号を
   波形に追加。`#diagram=<scope>` を URL に付けると起動時に開く
-- AI からは `waveview.py diagram <scope>` (または `--json`) で同じ内容を文字で読める。
-  名前から判定できなかった束 (`?`) に AI が名前を付ける、というのが次の段階
+- AI からは `waveview.py diagram <scope>` (または `--json`) で同じ内容を文字で読める
+- **名前から判定できなかった束 (`?`、斜体)** には名前を付けられる。束を右クリック →
+  「Name …」で手で付けるか、「Ask AI what … is」(ヘッダの「Ask AI to name interfaces」
+  なら未判定の束をまとめて) でエージェントに送る。エージェントは信号とソースを見て
+  `waveview.py label <scope> <box/bundle> "説明"` で返し、図にすぐ反映される。
+  名前は表示状態と一緒に保存される (`<dump>.waveview.json`)
 
 ## ソース表示: Active Annotation とドライバの追跡 (Verdi nTrace 風)
 

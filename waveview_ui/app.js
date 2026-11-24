@@ -98,6 +98,7 @@ function applyState(st) {
   renderNote();
   renderStatus();
   if (typeof followSource === 'function') followSource(st);
+  if (typeof followLabels === 'function') followLabels(st);
   requestData();
   draw();
 }
@@ -670,8 +671,8 @@ function renderDiagram(d) {
       pairSeen.set(pk, k + 1);
       const t = 0.5 + (k % 3 - 1) * 0.2;  // 0.3, 0.5, 0.7 along the edge, and a line lower each time
       const lx = x1 + (x2 - x1) * t, ly = y1 + (y2 - y1) * t - 4 + k * 13;
-      const label = (e.protocol || e.bundle) + (e.role ? ' ' + e.role : '') + ` ${e.width}b`;
-      text(g, lx, ly, label, '', 'middle');
+      const label = (e.label ? `“${e.label}” ` : '') + (e.protocol || (e.label ? '' : e.bundle)) + (e.role ? ' ' + e.role : '') + ` ${e.width}b`;
+      text(g, lx, ly, label.replace(/\s+/g, ' ').trim(), '', 'middle');
     }
     g.addEventListener('click', () => {
       const pre = d.scope ? d.scope + '.' : '';
@@ -687,16 +688,18 @@ function renderDiagram(d) {
   for (const n of nodes.values()) {
     const g = el('g', { class: 'box ' + n.kind + (n.box && n.box.scope === S.scope ? ' on' : ''), transform: `translate(${n.x},${n.y})` });
     el('rect', { width: n.w, height: n.h }, g);
+    const stubCls = (b) => 'stub' + (b.protocol || b.label ? ' proto' : ' unknown');
+    const stub = (x, y, b, anchor, boxName, txt) => { const t = text(g, x, y, txt, stubCls(b), anchor); t.addEventListener('contextmenu', (e) => bundleMenu(e, boxName, b)); return t; };
     if (n.kind === 'port') {
       text(g, n.w / 2, 18, n.label, 'name', 'middle');
-      n.in.forEach((b, i) => text(g, 8, 38 + i * 13, bundleLabel(b), 'stub' + (b.protocol ? ' proto' : '')));
-      n.out.forEach((b, i) => text(g, n.w - 8, 38 + i * 13, bundleLabel(b), 'stub' + (b.protocol ? ' proto' : ''), 'end'));
+      n.in.forEach((b, i) => stub(8, 38 + i * 13, b, 'start', '', bundleLabel(b)));
+      n.out.forEach((b, i) => stub(n.w - 8, 38 + i * 13, b, 'end', '', bundleLabel(b)));
     } else {
       const b = n.box;
       text(g, 10, 18, b.name, 'name');
       text(g, 10, 32, (b.module ? b.module + '  ·  ' : '') + `${b.signals} sig · ${b.insts} inst` + (b.loc ? ` · ${b.loc} lines` : '') + (b.in_dump ? '' : ' · not dumped'), 'dim');
-      n.in.forEach((x, i) => text(g, 8, 52 + i * 13, '▸ ' + bundleLabel(x), 'stub' + (x.protocol ? ' proto' : '')));
-      n.out.forEach((x, i) => text(g, n.w - 8, 52 + i * 13, bundleLabel(x) + ' ▸', 'stub' + (x.protocol ? ' proto' : ''), 'end'));
+      n.in.forEach((x, i) => stub(8, 52 + i * 13, x, 'start', b.name, '▸ ' + bundleLabel(x)));
+      n.out.forEach((x, i) => stub(n.w - 8, 52 + i * 13, x, 'end', b.name, bundleLabel(x) + ' ▸'));
       g.addEventListener('click', () => { S.scope = b.scope; S.pick.clear(); renderTree(); renderSigList(); for (const o of svg.querySelectorAll('.box.on')) o.classList.remove('on'); g.classList.add('on'); });
       g.addEventListener('dblclick', () => showDiagram(b.scope));
       g.addEventListener('contextmenu', (e) => treeMenu(e, { path: b.scope, name: b.name }));
@@ -707,12 +710,58 @@ function renderDiagram(d) {
 }
 
 function bundleLabel(b) {
-  const tag = b.protocol && b.protocol !== 'clock' && b.protocol !== 'reset' ? `${b.protocol}${b.role ? ' ' + b.role : ''}` : '';
-  const name = tag && b.name.toLowerCase() === b.protocol.toLowerCase() ? '' : b.name;  // "apb APB" says it once
+  let tag = b.protocol && b.protocol !== 'clock' && b.protocol !== 'reset' ? `${b.protocol}${b.role ? ' ' + b.role : ''}` : '';
+  if (b.label) tag = `“${b.label}”` + (tag ? ' ' + tag : '');  // what a person or the agent called it
+  const name = b.protocol && b.name.toLowerCase() === b.protocol.toLowerCase() ? '' : b.name;  // "apb APB" says it once
   return [name, tag, `${b.width}b`].filter(Boolean).join(' ');
 }
 
+// right-click on a bundle: name it, ask the agent, or add its signals
+function bundleMenu(e, boxName, b) {
+  e.preventDefault(); e.stopPropagation();
+  const key = boxName + '/' + b.name;
+  const pre = (DG.scope ? DG.scope + '.' : '') + (boxName ? boxName + '.' : '');
+  const names = b.signals.map((s) => pre + s).filter((n) => S.width.has(n));
+  const items = [
+    { label: `Name ${b.name}…`, fn: async () => {
+      const text = prompt(`What is ${key}?  (${b.signals.slice(0, 6).join(', ')}${b.signals.length > 6 ? ', …' : ''})`, b.label || '');
+      if (text === null) return;
+      await cmd('label', { scope: DG.scope, bundle: key, text, source: 'ui' });
+      showDiagram(DG.scope);
+    } },
+    { label: `Ask AI what ${b.name} is`, fn: () => askLabels([key]) },
+  ];
+  if (b.label) items.push({ label: 'Remove the name', fn: async () => { await cmd('label', { scope: DG.scope, bundle: key, clear: true }); showDiagram(DG.scope); } });
+  items.push(null, { label: `Add its ${names.length} signals to the waveform`, fn: () => { if (names.length) { addRows(names); toast(`added ${names.length} signals`); } else toast('none of these signals is in the dump'); } });
+  showMenu(e.clientX, e.clientY, items);
+}
+
+// the unidentified bundles of the scope, to the agent: it answers with `waveview.py label`
+function askLabels(keys) {
+  const d = DG.data;
+  if (!d) return;
+  const all = [];
+  for (const b of d.boxes) for (const bd of b.bundles) all.push([b.name + '/' + bd.name, bd, b.name]);
+  for (const bd of d.ports) all.push(['/' + bd.name, bd, '']);
+  const want = keys ? all.filter(([k]) => keys.includes(k)) : all.filter(([k]) => d.unlabelled.includes(k));
+  if (!want.length) { toast('every interface here is identified'); return; }
+  const lines = want.map(([k, bd, box]) => `- ${k}: ${bd.signals.join(', ')}${bd.dir ? '  (' + bd.dir + ')' : ''}`);
+  const text = `In scope ${d.scope || '(top)'}${d.module ? ' (module ' + d.module + ')' : ''} the block diagram has interface bundles that the signal names did not identify. ` +
+    `Tell what each one is (a bus protocol, a custom interface, a group of controls...) from the signals and the source, and name it with:\n` +
+    `  waveview.py label '${d.scope}' <box/bundle> "<what it is>"\n${lines.join('\n')}`;
+  cmd('ask', { text }).then((r) => { if (r) toast(S.state && S.state.listeners > 0 ? 'Asked. The agent is listening.' : 'Asked. No agent is listening now; it will get it from `waveview.py inbox`.'); });
+}
+
+// labels given while the diagram is open (by the agent) show up at once
+let lastLabelsJson = null;
+function followLabels(st) {
+  const j = JSON.stringify(st.iflabels || {});
+  if (lastLabelsJson !== null && j !== lastLabelsJson && $('diagdlg').open && DG.scope !== null) showDiagram(DG.scope);
+  lastLabelsJson = j;
+}
+
 $('b-diag').onclick = () => showDiagram();
+$('dg-ask').onclick = () => askLabels(null);
 $('dg-close').onclick = () => $('diagdlg').close();
 $('diagdlg').addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); $('diagdlg').close(); } });
 $('dg-up').onclick = () => { if (DG.scope) showDiagram(DG.scope.split('.').slice(0, -1).join('.')); };
