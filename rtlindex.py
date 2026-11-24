@@ -75,18 +75,43 @@ TOKEN_RE = re.compile(
 
 
 class Tok:
-    __slots__ = ("kind", "text", "line", "col")
+    __slots__ = ("kind", "text", "line", "col", "file")
 
-    def __init__(self, kind, text, line, col):
-        self.kind, self.text, self.line, self.col = kind, text, line, col
+    def __init__(self, kind, text, line, col, file=None):
+        # file: None for the file being parsed, else the `include it came from
+        self.kind, self.text, self.line, self.col, self.file = kind, text, line, col, file
 
     def __repr__(self):
         return "%s@%d:%d" % (self.text, self.line, self.col)
 
 
-def tokenize(text):
+MAX_INCLUDE_DEPTH = 16
+
+
+def find_include(name, from_file, incdirs):
+    """Where `include "name" points: next to the including file, then the
+    +incdir+ directories, then as given."""
+    if os.path.isabs(name):
+        return name if os.path.isfile(name) else None
+    cands = []
+    if from_file:
+        cands.append(os.path.join(os.path.dirname(os.path.abspath(from_file)), name))
+    cands += [os.path.join(d, name) for d in incdirs]
+    cands.append(name)
+    for c in cands:
+        if os.path.isfile(c):
+            return os.path.abspath(c)
+    return None
+
+
+def tokenize(text, path=None, incdirs=(), included=None, label=None, _chain=()):
     """Tokens with 1-based line and 0-based column. Comments and directive
-    lines are dropped (both branches of `ifdef stay)."""
+    lines are dropped (both branches of `ifdef stay). An `include is
+    expanded in place when the file is found (next to `path`, then in
+    incdirs): its tokens carry the included file as `file`, so that
+    positions keep pointing into it. `included` collects (abs path, label)
+    of the files pulled in; `label` names them for the tokens (a function
+    of the absolute path, e.g. a path relative to the index root)."""
     out = []
     line, line_start = 1, 0
     skip_line = 0
@@ -110,6 +135,25 @@ def tokenize(text):
             # the ones that take arguments there
             if s in ("`define", "`include", "`ifdef", "`ifndef", "`elsif", "`undef", "`timescale", "`line", "`pragma"):
                 skip_line = line
+            if s == "`include" and len(_chain) < MAX_INCLUDE_DEPTH:
+                arg = re.match(r'[ \t]*"([^"\n]+)"', text[m.end():])
+                inc = find_include(arg.group(1), path, incdirs) if arg else None
+                if inc and inc not in _chain and inc != (os.path.abspath(path) if path else None):
+                    try:
+                        with open(inc, errors="replace") as fh:
+                            itext = fh.read()
+                    except OSError:
+                        itext = None
+                    if itext is not None:
+                        name = label(inc) if label else inc
+                        if included is not None and all(p != inc for p, _ in included):
+                            included.append((inc, name))
+                        sub = tokenize(itext, inc, incdirs, included, label,
+                                       _chain + ((os.path.abspath(path),) if path else ()) + (inc,))
+                        for t in sub:
+                            if t.file is None:
+                                t.file = name
+                        out += sub
             continue
         if skip_line == line:
             continue
@@ -221,10 +265,17 @@ def _ids(toks):
 
 
 class Parser:
-    def __init__(self, path, text):
+    def __init__(self, path, text, abspath=None, incdirs=(), label=None):
+        """path: the file's name in the index (relative to its root);
+        abspath: where it is, for `include; label: index name of an
+        included file from its absolute path."""
         self.path = path
-        self.toks = tokenize(text)
+        self.included = []  # [(abs path, index name)]
+        self.toks = tokenize(text, abspath or path, incdirs, self.included, label)
         self.modules = []
+
+    def loc(self, tok, kind, detail=None):
+        return Loc(tok.file or self.path, tok.line, tok.col, kind, detail)
 
     def parse(self):
         toks = self.toks
@@ -240,8 +291,12 @@ class Parser:
                 while k < len(toks) and toks[k].text != end_kw:
                     k += 1
                 if toks[j].kind == "id":
-                    m = Module(toks[j].text, self.path, toks[j].line)
-                    m.end_line = toks[min(k, len(toks) - 1)].line
+                    m = Module(toks[j].text, toks[j].file or self.path, toks[j].line)
+                    endtok = toks[min(k, len(toks) - 1)]
+                    if (endtok.file or self.path) == m.file:
+                        m.end_line = endtok.line
+                    else:  # the module ends inside an `include: its last line in its own file
+                        m.end_line = max([x.line for x in toks[j:k] if (x.file or self.path) == m.file] or [m.line])
                     self._module(m, j + 1, k)
                     self.modules.append(m)
                 i = k + 1
@@ -278,7 +333,7 @@ class Parser:
             if before:
                 n = before[-1]
                 m.params.add(n.text)
-                m.decls.setdefault(n.text, Loc(self.path, n.line, n.col, "param"))
+                m.decls.setdefault(n.text, self.loc(n, "param"))
             del names
 
     def _ansi_ports(self, m, toks):
@@ -305,7 +360,7 @@ class Parser:
                 continue
             m.ports.append(name.text)
             m.port_dir[name.text] = direction or "inout"
-            m.decls[name.text] = Loc(self.path, name.line, name.col, "port", {"dir": direction or "inout"})
+            m.decls[name.text] = self.loc(name, "port", {"dir": direction or "inout"})
 
     @staticmethod
     def _split(toks, sep):
@@ -435,11 +490,11 @@ class Parser:
                 if name.text not in m.port_dir:
                     m.ports.append(name.text)
                 m.port_dir[name.text] = direction
-                m.decls[name.text] = Loc(self.path, name.line, name.col, kind, detail)
+                m.decls[name.text] = self.loc(name, kind, detail)
             else:
-                m.decls.setdefault(name.text, Loc(self.path, name.line, name.col, kind, detail))
+                m.decls.setdefault(name.text, self.loc(name, kind, detail))
             if eq < len(item):
-                m.add(m.drivers, name.text, Loc(self.path, name.line, name.col, "init"))
+                m.add(m.drivers, name.text, self.loc(name, "init"))
                 self._loads(m, item[eq + 1:])
 
     def _instance(self, m, seg, gen_stack):
@@ -466,7 +521,7 @@ class Parser:
         if k >= len(seg) or seg[k].text != "(":
             return False
         close = _match(seg, k, "(", ")")
-        inst = Instance(name_tok.text, mtype, self.path, name_tok.line, name_tok.col)
+        inst = Instance(name_tok.text, mtype, name_tok.file or self.path, name_tok.line, name_tok.col)
         inst.gen = next((g for g in reversed(gen_stack) if g), None)
         body = seg[k + 1:close]
         for item in self._split(body, ","):
@@ -522,7 +577,7 @@ class Parser:
             "always_ff" if any(t.text == "always_ff" for t in seg[:j + 1]) or seg[k].text == "<=" else "comb")
         targets = _ids_outside_index(lhs)
         for t in targets:
-            m.add(m.drivers, t.text, Loc(self.path, t.line, t.col, kind))
+            m.add(m.drivers, t.text, self.loc(t, kind))
         # everything else is read
         self._loads(m, seg[:j + 1])
         idx = [t for t in lhs if t not in targets]
@@ -531,7 +586,7 @@ class Parser:
 
     def _loads(self, m, toks):
         for t in _ids(toks):
-            m.add(m.loads, t.text, Loc(self.path, t.line, t.col, "read"))
+            m.add(m.loads, t.text, self.loc(t, "read"))
 
 
 # ---------------------------------------------------------------------------
@@ -539,8 +594,16 @@ class Parser:
 # ---------------------------------------------------------------------------
 
 
-def read_filelist(path, seen=None):
-    """Source files of a .f file (nested -f supported); options are ignored."""
+class Sources(list):
+    """The files of collect_sources, with the `include directories the
+    filelists named (+incdir+a+b, -incdir a, -I a)."""
+
+    incdirs = ()
+
+
+def read_filelist(path, seen=None, incdirs=None):
+    """Source files of a .f file (nested -f supported). +incdir+ / -incdir /
+    -I go to `incdirs` when given; other options are ignored."""
     seen = seen or set()
     path = os.path.abspath(path)
     if path in seen:
@@ -552,13 +615,37 @@ def read_filelist(path, seen=None):
         text = re.sub(r"//[^\n]*", "", fh.read())
     words = text.split()
     k = 0
+
+    def add_incdir(d):
+        if incdirs is None:
+            return
+        d = os.path.expandvars(d)
+        cand = d if os.path.isabs(d) else (_find_listed_dir(d, base) or os.path.join(base, d))
+        cand = os.path.abspath(cand)
+        if cand not in incdirs:
+            incdirs.append(cand)
+
     while k < len(words):
         w = words[k]
         if w in ("-f", "-F") and k + 1 < len(words):
             nested = words[k + 1]
             cand = nested if os.path.isfile(nested) else os.path.join(base, nested)
-            out += read_filelist(cand, seen)
+            out += read_filelist(cand, seen, incdirs)
             k += 2
+            continue
+        if w.startswith("+incdir+"):
+            for d in w[len("+incdir+"):].split("+"):
+                if d:
+                    add_incdir(d)
+            k += 1
+            continue
+        if w in ("-incdir", "-I", "-i", "+incdir") and k + 1 < len(words):
+            add_incdir(words[k + 1])
+            k += 2
+            continue
+        if w.startswith("-I") and len(w) > 2:
+            add_incdir(w[2:])
+            k += 1
             continue
         if w.startswith(("-", "+")):
             k += 1
@@ -569,6 +656,21 @@ def read_filelist(path, seen=None):
                 out.append(os.path.abspath(cand))
         k += 1
     return out
+
+
+def _find_listed_dir(w, base):
+    """A directory named in a filelist, found like _find_listed."""
+    if os.path.isdir(w):
+        return w
+    d = base
+    while True:
+        cand = os.path.join(d, w)
+        if os.path.isdir(cand):
+            return cand
+        up = os.path.dirname(d)
+        if up == d:
+            return None
+        d = up
 
 
 def _find_listed(w, base):
@@ -591,23 +693,30 @@ def _find_listed(w, base):
 
 
 def collect_sources(specs):
+    """The source files of the specs (a .f filelist, a file, a directory),
+    as a Sources list carrying the filelists' +incdir+ directories. A
+    directory given directly is also an `include directory, with its
+    subdirectories."""
     files = []
+    incdirs = []
     for spec in specs:
         if os.path.isdir(spec):
             for root, dirs, names in os.walk(spec):
                 dirs[:] = [d for d in dirs if not d.startswith((".", "obj_dir")) and d != "node_modules"]
+                incdirs.append(os.path.abspath(root))
                 for n in sorted(names):
                     if n.endswith((".sv", ".v")):
                         files.append(os.path.abspath(os.path.join(root, n)))
         elif spec.endswith((".f", ".F")):
-            files += read_filelist(spec)
+            files += read_filelist(spec, incdirs=incdirs)
         elif os.path.isfile(spec):
             files.append(os.path.abspath(spec))
-    seen, out = set(), []
+    seen, out = set(), Sources()
     for f in files:
         if f not in seen:
             seen.add(f)
             out.append(f)
+    out.incdirs = incdirs
     return out
 
 
@@ -621,19 +730,29 @@ class Index:
     an exporter on top of Verdi's NPI reading a KDB or simv.daidir) can
     write. save_json() writes that format."""
 
-    def __init__(self, files=(), root=None, producer="rtlindex"):
+    def __init__(self, files=(), root=None, producer="rtlindex", incdirs=None):
         self.root = os.path.abspath(root or os.getcwd())
         self.modules = {}
         self.files = list(files)
         self.errors = []
         self.hier = {}
         self.producer = producer
+        # `include search path: +incdir+ of the filelists (collect_sources
+        # attaches them), and where listed header files live
+        self.incdirs = list(incdirs if incdirs is not None else getattr(files, "incdirs", ()))
+        for f in files:
+            if f.endswith((".svh", ".vh")) and os.path.dirname(os.path.abspath(f)) not in self.incdirs:
+                self.incdirs.append(os.path.dirname(os.path.abspath(f)))
         for f in files:
             try:
                 with open(f, errors="replace") as fh:
                     text = fh.read()
-                for m in Parser(self.rel(f), text).parse():
+                p = Parser(self.rel(f), text, abspath=f, incdirs=self.incdirs, label=self.rel)
+                for m in p.parse():
                     self.modules.setdefault(m.name, m)
+                for inc, _name in p.included:
+                    if inc not in self.files:
+                        self.files.append(inc)  # watched for changes, like the listed ones
             except Exception as exc:  # noqa: BLE001
                 self.errors.append("%s: %s" % (f, exc))
 
@@ -852,14 +971,29 @@ class Index:
                     conns.append((p, [Tok("id", p, inst.line, inst.col)], inst.line, inst.col))
         return conns
 
-    def module_view(self, mod):
+    def module_files(self, mod):
+        """The files a module's code is in: its own and the `include ones
+        its declarations, drivers, loads and instances point into."""
+        files = [mod.file]
+        for table in (mod.decls.values(), (l for v in mod.drivers.values() for l in v),
+                      (l for v in mod.loads.values() for l in v), mod.instances.values()):
+            for x in table:
+                if x.file not in files:
+                    files.append(x.file)
+        return files
+
+    def module_view(self, mod, file=None):
         """Identifiers in the module's line range, classified for a source
-        view: signal / port / instance / module / param."""
-        text = self.read_text(mod.file)
+        view: signal / port / instance / module / param. With `file`, one of
+        the `include files of the module instead, whole."""
+        other = file is not None and file != mod.file
+        if other and file not in self.module_files(mod):
+            raise ValueError("%s is not a file of module %s" % (file, mod.orig))
+        text = self.read_text(file if other else mod.file)
         idents = []
         sigs = set(mod.decls) | set(mod.drivers) | set(mod.loads)
         for line, col, name in ident_at_file(text):
-            if not mod.line <= line <= mod.end_line:
+            if not other and not mod.line <= line <= mod.end_line:
                 continue
             if name in mod.instances:
                 kind = "instance"
@@ -874,11 +1008,12 @@ class Index:
             idents.append([line, col, name, kind])
         return {
             "module": mod.orig,
-            "file": mod.file,
-            "start": mod.line,
-            "end": mod.end_line,
+            "file": file if other else mod.file,
+            "start": 1 if other else mod.line,
+            "end": text.count("\n") + 1 if other else mod.end_line,
             "text": text,
             "idents": idents,
+            "files": self.module_files(mod),
             "instances": {n: {"module": i.mtype, "line": i.line, "gen": i.gen} for n, i in mod.instances.items()},
         }
 
@@ -1375,6 +1510,27 @@ def run_selftest():
     check("loads include instance inputs", any(t["kind"] == "port_input" for t in loads))
     v = idx.module_view(leaf)
     check("module view idents", any(i[2] == "r_q" and i[3] == "signal" for i in v["idents"]))
+    # `include: code pulled in from another file keeps its own positions
+    os.makedirs(os.path.join(d, "inc"))
+    with open(os.path.join(d, "inc", "body.svh"), "w") as fh:
+        fh.write("logic [7:0] w_inc;\nassign w_inc = din ^ 8'h5a;\nleaf u_inc (.i_clk(clk), .i_d(w_inc), .o_q());\n")
+    with open(os.path.join(d, "top2.sv"), "w") as fh:
+        fh.write('module top2 (input logic clk, input logic [7:0] din);\n`include "body.svh"\nendmodule\n')
+    with open(os.path.join(d, "list.f"), "w") as fh:
+        fh.write("+incdir+inc\nt.sv\ntop2.sv\n")
+    srcs = collect_sources([os.path.join(d, "list.f")])
+    idx2 = Index(srcs, root=d)
+    t2 = idx2.modules.get("top2")
+    check("include: +incdir+ from the filelist", os.path.join(d, "inc") in srcs.incdirs)
+    check("include: declarations, drivers and instances placed in the included file",
+          t2 is not None and t2.decls["w_inc"].file == "inc/body.svh" and t2.decls["w_inc"].line == 1
+          and t2.drivers["w_inc"][0].file == "inc/body.svh" and t2.drivers["w_inc"][0].line == 2
+          and "u_inc" in t2.instances and t2.instances["u_inc"].file == "inc/body.svh")
+    check("include: the module keeps its own file and end line", t2 is not None and t2.file == "top2.sv" and t2.end_line == 3)
+    check("include: the included file is watched and viewable",
+          os.path.join(d, "inc", "body.svh") in idx2.files
+          and idx2.module_view(t2, "inc/body.svh")["text"].startswith("logic [7:0] w_inc")
+          and any(i[2] == "u_inc" and i[3] == "instance" for i in idx2.module_view(t2, "inc/body.svh")["idents"]))
     check("verdi KDB names", is_verdi_db("/x/work.lib++") and is_verdi_db("sim/simv.daidir/")
           and is_elaborated("d.json") and not is_verdi_db("rtl/x.f"))
     js = os.path.join(d, "design.json")

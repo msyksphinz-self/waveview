@@ -732,9 +732,12 @@ class Hub:
             else:
                 files = rtlindex.collect_sources(specs)
                 if specs == ["."]:
-                    files = [f for f in files if "/vendor/" not in f and "/third_party/" not in f
-                             and "/obj_dir" not in f]
+                    kept = rtlindex.Sources(f for f in files if "/vendor/" not in f and "/third_party/" not in f
+                                            and "/obj_dir" not in f)
+                    kept.incdirs = files.incdirs
+                    files = kept
                 idx = rtlindex.Index(files)
+                files = list(files) + [f for f in idx.files if f not in files]  # `include files are watched too
         except Exception as exc:  # noqa: BLE001
             self.src_status = "index failed: %s" % exc
             sys.stderr.write("waveview: %s\n" % self.src_status)
@@ -852,12 +855,17 @@ class Hub:
                     break
         return found
 
-    def src_view(self, scope):
+    def src_view(self, scope, file=None):
+        """The source of a scope's module; `file` picks one of its `include
+        files instead of the module's own."""
         idx = self.index()
         mod, rest = idx.resolve_scope(scope)
         if mod is None:
             raise wq.QueryError("scope %s is not in the source index" % scope)
-        v = idx.module_view(mod)
+        try:
+            v = idx.module_view(mod, file or None)
+        except ValueError as exc:
+            raise wq.QueryError(str(exc))
         v["scope"] = scope
         names = self.dump_names(scope, mod)
         # a generate scope (gen_x[0]) also sees the signals of its module
@@ -1041,11 +1049,12 @@ class Hub:
             target = (info["loads"] if a.get("loads") else info["drivers"]) or ([info["decl"]] if info["decl"] else [])
             first = target[0] if target else {"line": None}
             self.state["source"] = {"scope": first.get("scope", info["scope"]), "line": first.get("line"),
+                                    "file": first.get("file"),
                                     "signal": info["signal"], "kind": "loads" if a.get("loads") else "drivers",
                                     "full": full, "at": time.time()}
         else:
             self.state["source"] = {"scope": a["scope"], "line": a.get("line"), "signal": a.get("name"),
-                                    "kind": a.get("kind"), "at": time.time()}
+                                    "file": a.get("file"), "kind": a.get("kind"), "at": time.time()}
         return self.state["source"]
 
     def op_ask(self, a):
@@ -1336,7 +1345,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                       {"Content-Disposition": 'attachment; filename="waveview.gtkw"'})
             if path == "/api/src/view":
                 with hub.lock:
-                    return self._send(200, hub.src_view(query["scope"][0]))
+                    return self._send(200, hub.src_view(query["scope"][0], query.get("file", [None])[0]))
             if path == "/api/src/signal":
                 with hub.lock:
                     return self._send(200, hub.src_signal(query["name"][0]))

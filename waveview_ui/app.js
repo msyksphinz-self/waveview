@@ -530,10 +530,10 @@ async function treeMenu(e, k) {
     showMenu(e.clientX, e.clientY, [{ label: 'No source for ' + k.name + ': ' + err.message, fn: () => {} }]);
     return;
   }
-  const items = [{ label: `Open module ${w.module}  (${w.file.split('/').pop()}:${w.line})`, fn: () => srcOpen(k.path, w.line) }];
+  const items = [{ label: `Open module ${w.module}  (${w.file.split('/').pop()}:${w.line})`, fn: () => srcOpen(k.path, w.line, { fileOf: w.file }) }];
   if (w.parent) {
-    items.push({ label: `Go to instance ${w.instance} in ${w.parent_module}  (line ${w.inst_line})`,
-                 fn: () => srcOpen(w.parent, w.inst_line, { sel: w.instance }) });
+    items.push({ label: `Go to instance ${w.instance} in ${w.parent_module}  (${w.inst_file.split('/').pop()}:${w.inst_line})`,
+                 fn: () => srcOpen(w.parent, w.inst_line, { sel: w.instance, fileOf: w.inst_file }) });
   }
   items.push(null, { label: 'Copy path ' + k.path, fn: () => navigator.clipboard && navigator.clipboard.writeText(k.path) });
   showMenu(e.clientX, e.clientY, items);
@@ -1590,12 +1590,14 @@ function showSrcPane(on) {
   requestData(); draw();
 }
 
-async function srcView(scope) {
-  let v = SRC.cache.get(scope);
+async function srcView(scope, file) {
+  // file: one of the module's `include files instead of its own
+  const key = scope + (file ? '\u0000' + file : '');
+  let v = SRC.cache.get(key);
   if (!v || v.gen !== gen()) {
-    v = await api('/api/src/view?scope=' + encodeURIComponent(scope));
+    v = await api('/api/src/view?scope=' + encodeURIComponent(scope) + (file ? '&file=' + encodeURIComponent(file) : ''));
     v.gen = gen();
-    SRC.cache.set(scope, v);
+    SRC.cache.set(key, v);
   }
   return v;
 }
@@ -1604,21 +1606,28 @@ async function srcOpen(scope, line, opts) {
   opts = opts || {};
   if ($('diagdlg').open) $('diagdlg').close();  // the source pane is behind the diagram
   let v;
-  try { v = await srcView(scope); } catch (e) { toast(e.message); return false; }
+  try {
+    v = await srcView(scope, opts.file);
+    // a place in an `include file of the module: that file, whole
+    if (!opts.file && v.files && v.files.length > 1 && opts.fileOf) {
+      const f = opts.fileOf;
+      if (f !== v.file && v.files.includes(f)) v = await srcView(scope, f);
+    }
+  } catch (e) { toast(e.message); return false; }
   const same = SRC.view === v;
   SRC.view = v; SRC.scope = scope; SRC.line = line || v.start;
   if (opts.sel !== undefined) SRC.sel = opts.sel;
   if (!opts.noHist) {
     SRC.hist = SRC.hist.slice(0, SRC.hpos + 1);
     const top = SRC.hist[SRC.hpos];
-    if (!top || top.scope !== scope || top.line !== SRC.line) { SRC.hist.push({ scope, line: SRC.line, sel: SRC.sel }); SRC.hpos = SRC.hist.length - 1; }
+    if (!top || top.scope !== scope || top.line !== SRC.line || top.file !== v.file) { SRC.hist.push({ scope, line: SRC.line, sel: SRC.sel, file: v.file }); SRC.hpos = SRC.hist.length - 1; }
   }
   if (!SRC.open) showSrcPane(true);
   if (!same) renderCode(); else markLines();
   scrollToLine(SRC.line);
   renderCrumbs();
   srcAnnot();
-  if (!opts.quiet) cmd('source', { scope, line: SRC.line, name: SRC.sel, kind: opts.kind || null });
+  if (!opts.quiet) cmd('source', { scope, line: SRC.line, name: SRC.sel, kind: opts.kind || null, file: v.file });
   return true;
 }
 
@@ -1836,7 +1845,7 @@ async function gotoTrace(i) {
   t.cur = i;
   const r = t.res[i];
   const sel = r.kind === 'parent_conn' ? r.signal : (r.kind.startsWith('port_') ? r.signal : r.signal || t.name);
-  await srcOpen(r.scope, r.line, { sel, kind: t.loads ? 'loads' : 'drivers' });
+  await srcOpen(r.scope, r.line, { sel, kind: t.loads ? 'loads' : 'drivers', fileOf: r.file });
   renderTrace();
 }
 
@@ -1927,7 +1936,7 @@ function srcHist(d) {
   if (n < 0 || n >= SRC.hist.length) return;
   SRC.hpos = n;
   const h = SRC.hist[n];
-  srcOpen(h.scope, h.line, { noHist: true, sel: h.sel });
+  srcOpen(h.scope, h.line, { noHist: true, sel: h.sel, fileOf: h.file });
 }
 $('src-back').onclick = () => srcHist(-1);
 $('src-fwd').onclick = () => srcHist(1);
@@ -1953,7 +1962,7 @@ function followSource(st) {
   if (!src || !src.at || src.at === lastSourceAt) return;
   lastSourceAt = src.at;
   if (st.last && st.last.client === S.client) return;
-  srcOpen(src.scope, src.line, { sel: src.signal, quiet: true });
+  srcOpen(src.scope, src.line, { sel: src.signal, quiet: true, fileOf: src.file });
 }
 
 // ---------------------------------------------------------------------------

@@ -334,6 +334,10 @@ waveview.py serve w.fst --rtl core/filelist.f --rtl core/tb/top
 `--rtl` に filelist (.f)・ファイル・ディレクトリを渡すと RTL を索引する
 (省略時はカレントディレクトリ、vendor/ と obj_dir は除く)。索引は
 `rtlindex.py` による軽量な解析で、エラボレータは使わない。
+`` `include `` はその場で展開する (filelist の `+incdir+` / `-incdir` / `-I`、
+インクルード元のファイルのディレクトリ、ディレクトリ指定ならその配下を探す)。
+インクルード先にある宣言・代入・インスタンス化はそのファイルの行として索引され、
+ソースペインもそのファイルを開く。`` `ifdef `` は両方の分岐を読む (マクロは評価しない)。
 ダンプの階層名 (`TOP.tb_scariv_top.u_dut.u_rob.r_rob_head`) をモジュール・
 インスタンス・generate ブロックをたどってソースに対応づける。ソースを編集すると
 自動で索引し直す。
