@@ -1011,13 +1011,7 @@ class Hub:
                     pname = port if port is not None else (im.ports[k] if im and k < len(im.ports) else None)
                     if pname is None:
                         continue
-                    net = None
-                    depth = 0
-                    for t in toks:
-                        if t.kind == "op":
-                            depth += 1 if t.text == "[" else -1
-                        elif t.kind == "id" and depth == 0 and net is None:
-                            net = t.text
+                    net = net_key(toks)
                     if net is None:
                         continue
                     if im is not None and pname in im.port_iface:
@@ -1038,7 +1032,13 @@ class Hub:
                 edges[key] = {"from": src, "to": dst, "bundle": pname, "protocol": bd.get("protocol"),
                               "role": bd.get("role"), "width": bd.get("width", 0), "iface": iface,
                               "modport": modport, "nets": [[pname, ibox or pname, modport or ""]]}
+            # an instance on the whole array (bus) also meets the ones on
+            # its elements (bus[0], bus[1]); the elements stay apart
+            whole = {k: v for k, v in nets.items() if "[" not in k}
             for net, ends in nets.items():
+                base = net.split("[", 1)[0]
+                if "[" in net and base in whole:
+                    ends = ends + whole[base]
                 drivers = [e for e in ends if e[2] == "output"]
                 sinks = [e for e in ends if e[2] == "input"]
                 if not drivers:
@@ -1964,6 +1964,40 @@ def print_snapshot(snap, radix="hex"):
             print("  " + line)
 
 
+def net_key(toks):
+    """The net a port connection names: the first identifier, with a
+    constant index or range kept (bus[1], bus[7:4]) so that the elements
+    of an array are different nets; a variable index (bus[i]) is the whole
+    array. None when the expression names no net (a constant)."""
+    base = None
+    k = 0
+    while k < len(toks):
+        t = toks[k]
+        if t.kind == "id":
+            base = t.text
+            k += 1
+            break
+        k += 1
+    if base is None:
+        return None
+    key = base
+    while k < len(toks) and toks[k].kind == "op" and toks[k].text == "[":
+        depth, j, inner = 1, k + 1, []
+        while j < len(toks) and depth:
+            if toks[j].kind == "op" and toks[j].text in "[]":
+                depth += 1 if toks[j].text == "[" else -1
+                if depth == 0:
+                    break
+            inner.append(toks[j])
+            j += 1
+        if inner and all(t.kind in ("num", "op") for t in inner) and any(t.kind == "num" for t in inner):
+            key += "[" + "".join(t.text for t in inner) + "]"
+        else:
+            break
+        k = j + 1
+    return key
+
+
 def print_tree(t):
     """The hierarchy by size as an indented list: signals below each scope,
     scopes below it, the module and its lines."""
@@ -2324,6 +2358,13 @@ def run_selftest():
     check("diagram: instances as boxes with their size",
           dg["module"] == "top" and "u_leaf" in names and names["u_leaf"]["module"] == "leaf"
           and names["u_leaf"]["loc"] > 5 and names["u_leaf"]["signals"] > 0)
+    T = rtlindex.Tok
+    check("diagram: array elements are nets of their own, a variable index the whole array",
+          net_key([T("id", "bus", 1, 0), T("op", "[", 1, 3), T("num", "1", 1, 4), T("op", "]", 1, 5)]) == "bus[1]"
+          and net_key([T("id", "bus", 1, 0), T("op", "[", 1, 3), T("id", "i", 1, 4), T("op", "]", 1, 5)]) == "bus"
+          and net_key([T("id", "bus", 1, 0), T("op", "[", 1, 3), T("num", "7", 1, 4), T("op", ":", 1, 5), T("num", "0", 1, 6),
+                       T("op", "]", 1, 7)]) == "bus[7:0]"
+          and net_key([T("num", "1'b0", 1, 0)]) is None)
     check("diagram: the scope's ports and connections through nets",
           any(b["signals"] == ["clk"] for b in dg["ports"])
           and any(e["from"] == "" and e["to"] == "u_leaf" for e in dg["edges"]))

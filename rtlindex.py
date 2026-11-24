@@ -1369,6 +1369,15 @@ class _XmlModule:
                 self._port_toks(kids[0], toks)
                 idx_t = []
                 for c in kids[1:]:
+                    if c.tag == "const" and not list(c):
+                        # a constant index: kept, so that bus[0] and bus[1] are different nets
+                        v = (c.get("name") or "").split("h")[-1]
+                        try:
+                            v = str(int(v, 16))
+                        except ValueError:
+                            pass
+                        idx_t.append(Tok("num", v, 0, 0))
+                        continue
                     for v in c.iter("varref"):
                         f, line, col = self.loc(v)
                         idx_t.append(Tok("id", _vdecode(v.get("name")), line, col))

@@ -384,22 +384,36 @@ class Export:
             for o in ops:
                 out += self.expr_ids(o, depth + 1)
             return out
+        if t == "npiConstant":
+            v = _try(h, "value")
+            if v is None:
+                v = _try(h, "decompile")
+            return [["num", str(v)]] if v not in (None, "") else []
         n = _name(h)
-        if n and t not in ("npiConstant", "npiParameter"):
+        if n and t != "npiParameter":
             return self.name_ids(n.split(".")[-1])
         return []
 
     @staticmethod
     def name_ids(n):
-        """"arr[g]" as the KDB names a select: the base, then the index
-        identifiers in [ ]."""
+        """"arr[g]" or "bus[1]" as the KDB names a select: the base, then
+        what is in the [ ]: identifiers, and numbers (so that bus[0] and
+        bus[1] stay different nets)."""
         m = re.match(r"([A-Za-z_][A-Za-z0-9_$]*)(\[.*\])?$", n)
         if not m:
             return []
         out = [["id", m.group(1)]]
         if m.group(2):
-            inner = [["id", w] for w in IDENT.findall(m.group(2)) if w not in KEYWORDS]
-            out += [["op", "["]] + inner + [["op", "]"]]
+            for part in re.findall(r"\[([^\]]*)\]", m.group(2)):
+                inner = []
+                for w in re.findall(r"[A-Za-z_][A-Za-z0-9_$]*|\d[\d_]*(?:'[sS]?[bodhBODH][0-9a-fA-FxXzZ_]+)?|:", part):
+                    if w == ":":
+                        inner.append(["op", ":"])
+                    elif w[0].isdigit():
+                        inner.append(["num", w])
+                    elif w not in KEYWORDS:
+                        inner.append(["id", w])
+                out += [["op", "["]] + inner + [["op", "]"]]
         return out
 
     def conns(self, inst, file):
@@ -415,7 +429,7 @@ class Export:
                 if tok[0] == "id":
                     toks.append(["id", tok[1], ln, self.col_of(file, ln, tok[1])])
                 else:
-                    toks.append(["op", tok[1], 0, 0])
+                    toks.append([tok[0], tok[1], 0, 0])  # op or num
             out.append([pname, toks, ln, self.col_of(file, ln, "." + pname) if pname else 0])
         return out
 
