@@ -30,6 +30,16 @@ AI agent use together, built for remote development.
   an FSDB in place through Verdi's FsdbReader library, with the same
   on-demand protocol as FST, locally or over ssh. Without that library FSDB
   goes through Verdi's `fsdb2vcd`
+- **Dumps with tens of millions of signals**: `--scope tb.u_dut.u_core`
+  (wavequery and `serve`, FST and FSDB, also over ssh) loads only the signals
+  below a scope. For a local FSDB too large to list, wavequery keeps the
+  names in an index on disk (`nameindex.py`, under `~/.cache/waveview/index`,
+  about 25 bytes per signal): the first query writes it, later ones read
+  only the scopes of the dump and look the names up there. An 84 million
+  signal emulator dump: 4 minutes per query before, 40 s for the first and
+  3 to 10 s for the next ones. `WAVE_INDEX_DIR` moves the index,
+  `WAVE_INDEX=0` turns it off, `WAVE_INDEX_MIN` (default 1000000 variable
+  idcodes) is the size it starts at
 - Verdi interop: nWave `.rc` in and out; GTKWave `.gtkw` in and out
 
 Python 3 standard library only. FST support builds a small C helper on
@@ -114,6 +124,7 @@ the Verilator 5.040 sources for it. The result is `dist/waveview.app` and
 | `waverc.py` | waveview rc (`.wvrc`): read and write debug views (format in its docstring) |
 | `wavequery.py` | text queries over a dump |
 | `wavesource.py`, `fstsrv.c`, `fsdbsrv.cc` | lazy FST / FSDB reading (local or over ssh); `fsdbsrv.cc` needs Verdi's FsdbReader |
+| `nameindex.py` | the names of a very large FSDB, looked up in an index on disk |
 | `remote.py` | ssh transport, remote build of `fstsrv` / `fsdbsrv`, remote RTL index |
 | `opener.py` | Open dialog backend: ssh hosts, directory listings, app window |
 | `rtlindex.py` | SystemVerilog index (heuristic, Verilator `--xml-only`, or design JSON) |

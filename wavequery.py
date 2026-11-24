@@ -97,8 +97,15 @@ def _cache_path(path):
     return os.path.join(base, "waveview", "parse", digest + ".pickle")
 
 
+SELECT_MAX = 10000  # signals one -s pattern may name in a dump read through a name index
+
+
 class Wave:
     """A loaded dump plus the indexes the queries need."""
+
+    # a nameindex.NameIndex for a dump with too many signals to hold
+    # (wavesource.py): signals and by_name are then looked up on disk
+    names = None
 
     def __init__(self, dump):
         self.timescale = dump.timescale
@@ -114,15 +121,24 @@ class Wave:
 
     def resolve(self, name):
         """One signal from a full name or a unique suffix."""
-        sig = self.by_name.get(name)
-        if sig is not None:
-            return sig
-        if any(c in name for c in "*?"):
-            hits = [s for s in self.signals if w2i._matches(s.name, name)]
+        if self.names is not None:
+            if any(c in name for c in "*?"):
+                hits, total = self.names.glob(name, limit=10)
+            else:
+                sig, hits, total = self.names.suffix(name, limit=10)
+                if sig is not None:
+                    return sig
         else:
-            tail = "." + name
-            hits = [s for s in self.signals if s.name.endswith(tail)]
-        if len(hits) == 1:
+            sig = self.by_name.get(name)
+            if sig is not None:
+                return sig
+            if any(c in name for c in "*?"):
+                hits = [s for s in self.signals if w2i._matches(s.name, name)]
+            else:
+                tail = "." + name
+                hits = [s for s in self.signals if s.name.endswith(tail)]
+            total = len(hits)
+        if total == 1:
             return hits[0]
         if not hits:
             raise QueryError(
@@ -131,13 +147,16 @@ class Wave:
                 % (name, self._suggest(name), name.split(".")[-1])
             )
         listing = "\n".join("  " + s.name for s in hits[:10])
-        more = "\n  ... %d more" % (len(hits) - 10) if len(hits) > 10 else ""
+        more = "\n  ... %d more" % (total - 10) if total > 10 else ""
         raise QueryError(
             "%r is ambiguous, it matches %d signals:\n%s%s\n"
-            "hint: add more of the hierarchy to make it unique" % (name, len(hits), listing, more)
+            "hint: add more of the hierarchy to make it unique" % (name, total, listing, more)
         )
 
     def _suggest(self, name):
+        if self.names is not None:
+            close = self.names.suggest(name)
+            return "\n".join("  " + n for n in close) if close else "  (none)"
         leaf = name.split(".")[-1].lower()
         leaf = re.sub(r"\[.*", "", leaf)
         scored = []
@@ -163,9 +182,9 @@ class Wave:
         out, seen = [], set()
         for pat in patterns:
             if any(c in pat for c in "*?"):
-                hits = [s for s in self.signals if w2i._matches(s.name, pat)]
+                hits = self.glob(pat)
                 if not hits and not pat.startswith("*"):
-                    hits = [s for s in self.signals if w2i._matches(s.name, "*." + pat)]
+                    hits = self.glob("*." + pat)
                 if not hits:
                     raise QueryError(
                         "pattern %r matched no signal. Closest names:\n%s" % (pat, self._suggest(pat.replace("*", "")))
@@ -177,6 +196,27 @@ class Wave:
                     seen.add(s.name)
                     out.append(s)
         return out
+
+    def glob(self, pattern):
+        """The signals whose full name matches a * ? pattern."""
+        if self.names is None:
+            return [s for s in self.signals if w2i._matches(s.name, pattern)]
+        hits, total = self.names.glob(pattern, limit=SELECT_MAX)
+        if total > len(hits):
+            raise QueryError("pattern %r matches %d signals, too many to read at once\n"
+                             "hint: add more of the hierarchy to the pattern" % (pattern, total))
+        return hits
+
+    def top_scopes(self):
+        """{the first three levels of the hierarchy: signals below}."""
+        if self.names is not None:
+            return dict(self.names.scopes)
+        scopes = {}
+        for s in self.signals:
+            parts = s.name.split(".")
+            top = ".".join(parts[: min(len(parts) - 1, 3)])
+            scopes[top] = scopes.get(top, 0) + 1
+        return scopes
 
     # -- values -------------------------------------------------------------
 
@@ -301,7 +341,26 @@ class Wave:
         return out
 
 
-def load(path):
+def norm_scopes(scope):
+    """--scope values as dotted paths: /tb/u_dut and tb.u_dut. are tb.u_dut."""
+    out = []
+    for s in scope or ():
+        for one in s.split(","):
+            one = one.strip().replace("/", ".").strip(".")
+            if one and one not in out:
+                out.append(one)
+    return out
+
+
+def in_scopes(name, scopes):
+    return any(name == s or name.startswith(s + ".") for s in scopes)
+
+
+def load(path, scope=None, index=True):
+    """scope: keep only the signals below these scopes (a very large dump
+    opens in the time it takes to list those). index: let a dump with very
+    many signals keep its names on disk, which suits queries that name
+    signals and not a program that walks all of them."""
     # FST is read in place, on demand (wavesource.py), also from another
     # machine over ssh (host:/path/w.fst); WAVE_EAGER=1 falls back to
     # converting and loading a local FST whole
@@ -311,9 +370,20 @@ def load(path):
     if not remote.is_remote(path) and not os.path.isfile(path):
         raise QueryError("no such file: %s" % path)
 
-    lazy = wavesource.open_lazy(path)
+    scope = norm_scopes(scope)
+    lazy = wavesource.open_lazy(path, scope=scope, index=index)
     if lazy is not None:
         return lazy
+    wave = _load_whole(path)
+    if scope:
+        wave.signals = [s for s in wave.signals if in_scopes(s.name, scope)]
+        wave.by_name = {s.name: s for s in wave.signals}
+        if not wave.signals:
+            raise QueryError("no signal below the scope %s in %s" % (", ".join(scope), path))
+    return wave
+
+
+def _load_whole(path):
     cpath = _cache_path(path)
     if os.path.isfile(cpath):
         try:
@@ -783,11 +853,7 @@ def cmd_info(args, wave, out):
         e = wave.edges(s)
         period = (e[-1] - e[0]) // (len(e) - 1) if len(e) > 1 else None
         clocks.append({"name": s.name, "rising_edges": n, "period": period})
-    scopes = {}
-    for s in wave.signals:
-        parts = s.name.split(".")
-        top = ".".join(parts[: min(len(parts) - 1, 3)])
-        scopes[top] = scopes.get(top, 0) + 1
+    scopes = wave.top_scopes()
     obj = {
         "file": args.dump,
         "timescale": wave.timescale,
@@ -819,24 +885,35 @@ def cmd_list(args, wave, out):
     pats = args.patterns or ["*"]
     sigs = []
     seen = set()
+    matches = 0
     for p in pats:
         if not any(c in p for c in "*?"):
             p = "*" + p + "*"
         elif not p.startswith("*"):
             p = "*" + p  # a glob names the end of the hierarchy, like -s does
-        for s in wave.signals:
-            if s.name not in seen and w2i._matches(s.name, p):
+        if wave.names is not None:
+            # the index counts the matches and hands out only the rows shown
+            # (a signal two patterns match is counted twice)
+            hits, total = wave.names.glob(p, limit=args.max_rows or None)
+            matches += total
+        else:
+            hits = [s for s in wave.signals if w2i._matches(s.name, p)]
+        for s in hits:
+            if s.name not in seen:
                 seen.add(s.name)
                 sigs.append(s)
+    if wave.names is None:
+        matches = len(sigs)
     rows = [(s.name, s.width, wave.change_count(s)) for s in sigs]
     rows = [(n, w, "-" if c is None else c) for n, w, c in rows]
     shown, left = out.limit(rows)
+    left += matches - len(rows)
     obj = {
-        "matches": len(rows),
+        "matches": matches,
         "signals": [{"name": n, "width": w, "changes": c} for n, w, c in shown],
         "truncated": left,
     }
-    lines = ["%d signals match" % len(rows)] + text_table(["name", "width", "changes"], shown)
+    lines = ["%d signals match" % matches] + text_table(["name", "width", "changes"], shown)
     if left:
         lines.append(truncated_line(left, "signals"))
     out.emit(obj, lines)
@@ -1057,6 +1134,8 @@ def run_selftest():
     path = os.path.join(tmp, "selftest.vcd")
     w2i.write_selftest_vcd(path)
     os.environ["XDG_CACHE_HOME"] = os.path.join(tmp, "cache")
+    for k in ("WAVE_INDEX_DIR", "WAVE_INDEX", "WAVE_INDEX_MIN"):
+        os.environ.pop(k, None)
 
     def run(argv):
         buf = io.StringIO()
@@ -1114,6 +1193,31 @@ def run_selftest():
     print("%-4s %s" % ("ok" if ok else "FAIL", "unknown name is a clear error"))
     failures += 0 if ok else 1
 
+    # --scope keeps the signals below a scope (here on a VCD, loaded whole)
+    scoped = [
+        ("scope keeps what is below", ["list", path, "--scope", "/tb_wave/dut"],
+         lambda t: "dut.req" in t and "dut.data" in t),
+        ("scope of one signal", ["list", path, "--scope", "tb_wave.dut.req"], lambda t: "1 signals match" in t),
+    ]
+    for label, argv, test in scoped:
+        check(label, argv, test, record=False)
+
+    def scope_error(label, dump):
+        nonlocal failures
+        rc, text = run(["info", dump, "--scope", "tb_wave.nosuch"])
+        ok = rc == 2 and "no signal below the scope" in text
+        print("%-4s %s" % ("ok" if ok else "FAIL", label))
+        failures += 0 if ok else 1
+
+    scope_error("scope with nothing below is a clear error", path)
+
+    # the name index of a very large dump, against a plain list of the names
+    import nameindex
+
+    bad = nameindex.selftest(tmp)
+    print("%-4s %s%s" % ("FAIL" if bad else "ok", "name index agrees with the list", "".join("\n     " + b for b in bad[:10])))
+    failures += 1 if bad else 0
+
     # the same queries on an FST, which is read lazily (wavesource.py)
     conv = w2i.build_fst_converter(verbose=False)
     if conv is None:
@@ -1130,6 +1234,9 @@ def run_selftest():
         w = load(fst)
         check("fst: read lazily", ["info", fst], lambda t: getattr(w, "lazy", False), record=False)
         w.close()
+        for label, argv, test in scoped:
+            check("fst: " + label, [fst if x == path else x for x in argv], test, record=False)
+        scope_error("fst: scope with nothing below is a clear error", fst)
         # an FSDB goes through fsdbsrv, which speaks the same protocol: with
         # no Verdi here, fstsrv on a copy of the FST stands in for it
         fsdb = os.path.join(tmp, "selftest.fsdb")
@@ -1170,8 +1277,32 @@ def run_selftest():
                 check("verdi fsdb: " + label, [real if x == path else x for x in argv], test, record=False)
             w = load(real)
             check("verdi fsdb: read in place by fsdbsrv", ["info", real],
-                  lambda t: getattr(w, "tool", "") == "fsdbsrv", record=False)
+                  lambda t: getattr(w, "tool", "") == "fsdbsrv" and w.names is None, record=False)
             w.close()
+            for label, argv, test in scoped:
+                check("verdi fsdb: " + label, [real if x == path else x for x in argv], test, record=False)
+            scope_error("verdi fsdb: scope with nothing below is a clear error", real)
+            # the same again as a dump too large to list: the first open
+            # writes the name index, the second one reads only the scopes
+            old_min = os.environ.get("WAVE_INDEX_MIN")
+            os.environ["WAVE_INDEX_MIN"] = "0"
+            try:
+                for turn in ("index written", "index read"):
+                    for label, argv, test in cases:
+                        if "cache" in label:
+                            continue
+                        check("verdi fsdb, %s: %s" % (turn, label), [real if x == path else x for x in argv], test,
+                              record=False)
+                w = load(real)
+                check("verdi fsdb: names looked up in the index", ["info", real],
+                      lambda t: w.names is not None and w.declared is not None and "tb_wave.dut.data" in w.by_name
+                      and len(w.signals) == len(load(path).signals), record=False)
+                w.close()
+            finally:
+                if old_min is None:
+                    os.environ.pop("WAVE_INDEX_MIN", None)
+                else:
+                    os.environ["WAVE_INDEX_MIN"] = old_min
 
     print("selftest: %s" % ("PASS" if failures == 0 else "%d FAILED" % failures))
     return 0 if failures == 0 else 1
@@ -1189,6 +1320,8 @@ def build_parser():
                         help="cap on printed rows, 0 for no cap (default %(default)s)")
     common.add_argument("--radix", choices=("hex", "dec", "bin"), default="hex", help="bus value radix (text)")
     common.add_argument("--clock", help="clock signal (default: auto detect)")
+    common.add_argument("--scope", action="append", metavar="A.B.C",
+                        help="only the signals below this scope (repeatable): a very large dump opens faster")
 
     window = argparse.ArgumentParser(add_help=False)
     window.add_argument("--cycles", help="cycle window START:END (inclusive, negative counts from the end)")
@@ -1250,7 +1383,7 @@ def main(argv=None):
         parser.print_help()
         return 2
     try:
-        wave = load(args.dump)
+        wave = load(args.dump, scope=args.scope)
         out = Out(args)
         {
             "info": cmd_info,

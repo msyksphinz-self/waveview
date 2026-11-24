@@ -100,7 +100,8 @@ def registry_dir():
 class Hub:
     """The loaded dump, the shared view state, and the push channel."""
 
-    def __init__(self, dump_path, gtkw=None, rtl=None, rc=None):
+    def __init__(self, dump_path, gtkw=None, rtl=None, rc=None, scope=None):
+        self.scope = scope  # only the signals below these scopes are loaded
         if remote.is_remote(dump_path):
             # a dump on another machine: the view state is kept here
             self.dump_path = dump_path
@@ -112,7 +113,8 @@ class Hub:
             self.state_path = self.dump_path + ".waveview.json"
         self.lock = threading.RLock()
         self.retired = False
-        self.wave = wq.load(self.dump_path)
+        # the viewer walks the signal list (hierarchy, search): no name index
+        self.wave = wq.load(self.dump_path, scope=self.scope, index=False)
         self.gen = 1
         self.mtime = self._stamp()
         self.subscribers = []
@@ -1031,7 +1033,7 @@ class Hub:
                 last_seen = sig
                 continue
             try:
-                wave = wq.load(self.dump_path)
+                wave = wq.load(self.dump_path, scope=self.scope, index=False)
             except Exception as exc:  # noqa: BLE001
                 sys.stderr.write("waveview: reload failed, will retry: %s\n" % exc)
                 last_seen = None
@@ -1356,7 +1358,8 @@ def cmd_serve(args):
         remote.Remote.batch = True  # ssh must not wait for a prompt nobody sees
     hub = None
     if args.dump:
-        hub = Hub(args.dump, gtkw=args.gtkw, rc=args.rc, rtl=args.rtl or (["."] if not args.no_rtl else None))
+        hub = Hub(args.dump, gtkw=args.gtkw, rc=args.rc, rtl=args.rtl or (["."] if not args.no_rtl else None),
+                  scope=args.scope)
     token = args.token or secrets.token_urlsafe(16)
     Handler.hub = hub
     Handler.token = token
@@ -1903,6 +1906,9 @@ def run_selftest():
         check("source: testbench signal is a clear error", False)
     except wq.QueryError as exc:
         check("source: testbench signal is a clear error", "outside the RTL" in str(exc))
+    # serve --scope: only the signals below the scope are loaded
+    hub_sc = Hub(path, rtl=None, scope=["tb_wave.dut.req"])
+    check("scope: only what is below is loaded", [s.name for s in hub_sc.wave.signals] == ["tb_wave.dut.req"])
     # Verdi interop: an nWave .rc in, an .rc out, and FSDB through fsdb2vcd
     rc = os.path.join(tmp, "v.rc")
     with open(rc, "w") as fh:
@@ -2001,17 +2007,24 @@ def run_selftest():
                   any(f == "fstsrv" for _, _, fs in os.walk(os.path.join(rhome, ".cache")) for f in fs))
             check("remote: dump stamp", rw.stamp()[0] == os.path.getsize(fst))
             rw.close()
+            rw = wq.load(spec, scope=["tb_wave.dut.req"])
+            check("remote: --scope reaches the server", [s.name for s in rw.signals] == ["tb_wave.dut.req"]
+                  and rw.value(rw.by_name["tb_wave.dut.req"], 25) == lw.value(lw.by_name["tb_wave.dut.req"], 25))
+            rw.close()
             lw.close()
             r, _ = remote.parse(spec)
             doc = r.index_rtl([src_dir], src_dir)
             got = r.read_files([os.path.join(src_dir, "t.sv")])
             check("remote: RTL indexed on the server and read over ssh",
                   "leaf" in doc["modules"] and "module leaf" in got[os.path.join(src_dir, "t.sv")])
+            with open(os.path.join(tmp, "r2.fsdb"), "w") as fh:
+                fh.write("stand-in")
             seen = opener.list_remote("buildhost", tmp)
             # pwd on the "server" may spell the directory through a symlink (macOS: /var -> /private/var)
             check("remote: directory listing", os.path.realpath(seen["path"]) == os.path.realpath(tmp)
                   and any(e["name"] == "r.fst" and e["size"] == os.path.getsize(fst) for e in seen["entries"])
                   and any(e["name"] == "rtl" and e["dir"] for e in seen["entries"])
+                  and any(e["name"] == "r2.fsdb" for e in seen["entries"])
                   and not any(e["name"] == "t.vcd" for e in seen["entries"]))
         finally:
             if old is None:
@@ -2075,6 +2088,9 @@ def build_parser():
                    help="RTL sources for the source view: a .f filelist, a file or a directory "
                         "(repeatable; default: the current directory, without vendor/)")
     s.add_argument("--no-rtl", action="store_true", help="no source view")
+    s.add_argument("--scope", action="append", metavar="A.B.C",
+                   help="load only the signals below this scope (repeatable): a dump with tens of millions of "
+                        "signals opens in seconds instead of minutes")
     s.add_argument("--rtl-root", help="for --rtl on another machine: the directory there that source paths are "
                                        "shown relative to (default: the first entry's directory)")
     s.add_argument("--open", action="store_true", help="open a local browser")
