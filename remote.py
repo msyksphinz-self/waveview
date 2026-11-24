@@ -55,6 +55,7 @@ class Remote:
 
     def argv(self, command, compress=False):
         base = shlex.split(os.environ.get("WAVEVIEW_SSH", "ssh"), posix=os.name != "nt")
+        command = remote_env() + command
         opts = ["-T", "-o", "ServerAliveInterval=30"]
         if self.batch:
             opts += ["-o", "BatchMode=yes", "-o", "ConnectTimeout=15"]
@@ -191,6 +192,23 @@ class Remote:
         cmd = "cd %s && python3 - %s -o /dev/stdout --quiet" % (shlex.quote(root), args)
         raw = self.run(cmd, data=src, timeout=1800)
         return json.loads(raw.decode(errors="replace"))
+
+
+def remote_env():
+    """A prefix that sets variables for every command on the server, from
+    WAVEVIEW_REMOTE_ENV here: e.g. "VERDI_HOME=/tools/verdi/Y-2026.03" when
+    the server's login environment does not say where Verdi is. ssh runs
+    commands without a login shell, so ~/.bashrc exports may not be there."""
+    text = os.environ.get("WAVEVIEW_REMOTE_ENV", "").strip()
+    if not text:
+        return ""
+    pairs = []
+    for word in shlex.split(text):
+        name, eq, value = word.partition("=")
+        if not eq or not re.match(r"^[A-Za-z_]\w*$", name):
+            raise RemoteError("WAVEVIEW_REMOTE_ENV: expected NAME=value, got %r" % word)
+        pairs.append("%s=%s" % (name, shlex.quote(value)))
+    return "env " + " ".join(pairs) + " "
 
 
 SOURCES = {"fstsrv": "fstsrv.c", "fsdbsrv": "fsdbsrv.cc"}
