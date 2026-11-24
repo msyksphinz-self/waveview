@@ -1906,6 +1906,10 @@ def run_selftest():
         check("source: testbench signal is a clear error", False)
     except wq.QueryError as exc:
         check("source: testbench signal is a clear error", "outside the RTL" in str(exc))
+    # what is sent to a server to be built there must be next to this file,
+    # also inside the packaged app (build_macos.sh / build_windows.sh --add-data)
+    check("remote: the sources a server builds are here",
+          all(os.path.isfile(os.path.join(remote.HERE, f)) for f in list(remote.SOURCES.values()) + ["rtlindex.py"]))
     # serve --scope: only the signals below the scope are loaded
     hub_sc = Hub(path, rtl=None, scope=["tb_wave.dut.req"])
     check("scope: only what is below is loaded", [s.name for s in hub_sc.wave.signals] == ["tb_wave.dut.req"])
