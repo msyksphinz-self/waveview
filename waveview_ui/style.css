@@ -154,6 +154,10 @@ table.keys td { padding: 3px 14px 3px 0; }
 #code .id.k-param { color: #7fdbca; }
 [data-theme="light"] #code .id.k-param { color: #00796b; }
 #code .id:hover { text-decoration: underline; }
+#src-find { width: 240px; font-size: 12px; }
+#src-find-n { min-width: 48px; font-size: 11px; }
+#code mark.fm { background: rgba(255, 200, 0, .35); color: inherit; border-radius: 2px; }
+#code mark.fm.cur { background: #ffb000; color: #000; }
 #code .id.sel { background: rgba(255, 238, 85, .25); outline: 1px solid rgba(255, 238, 85, .6); }
 #code .id.hit { background: rgba(78, 161, 255, .28); }
 #code .ann { font-size: 10px; line-height: 14px; margin-left: 2px; padding: 0 3px; border-radius: 3px; background: rgba(63, 215, 230, .14); color: var(--ann); vertical-align: 1px; }

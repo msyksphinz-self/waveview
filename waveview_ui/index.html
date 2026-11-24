@@ -55,6 +55,8 @@
     <button id="src-back" title="Back (Alt+←)">◀</button><button id="src-fwd" title="Forward (Alt+→)">▶</button>
     <span id="src-crumbs"></span>
     <span class="grow"></span>
+    <input id="src-find" spellcheck="false" placeholder="find in file  (Ctrl+F here · Enter next · Shift+Enter prev)" title="Search the text of the file shown. Enter: next match, Shift+Enter: previous, Esc: clear">
+    <span id="src-find-n" class="dim"></span>
     <span id="src-file" class="dim"></span>
     <label class="chk" title="Show the value at the cursor next to each signal"><input type="checkbox" id="src-ann" checked> Active annotation</label>
     <button id="src-close" title="Close (S)">×</button>
@@ -143,6 +145,7 @@
       <tr><th>a</th><td>Send to AI</td><th>Esc</th><td>Clear selection, close menus</td></tr>
       <tr><th>Double-click row</th><td>Trace drivers in the source</td><th>S</th><td>Show / hide the source pane</td></tr>
       <tr><th>Right-click tree node</th><td>Open its module, or where the parent instantiates it</td><th>D</th><td>Block diagram of the selected scope</td></tr>
+      <tr><th>Source: Ctrl+F</th><td>Find in the file shown (Enter next, Shift+Enter previous, Esc clear)</td><th></th><td></td></tr>
       <tr><th>Source: double-click</th><td>Drivers (Shift: loads); instance: go in</td><th>Source: Ctrl+click</th><td>Add the signal to the waveform</td></tr>
       <tr><th>Alt+← / →</th><td>Source history back / forward</td><th>[ / ]</th><td>Previous / next named cursor</td></tr>
       <tr><th>Right-click wave</th><td>Named cursor, comment, arrow here; edit / remove one</td><th>Load rc / .wvrc</th><td>Open / save a debug view file</td></tr>

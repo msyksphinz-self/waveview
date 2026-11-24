@@ -1899,7 +1899,68 @@ function renderCode() {
   });
   $('code').innerHTML = html.join('');
   markLines();
+  if (SF.q) srcFindApply(false);
 }
+
+// -- find in the file shown: marks every match, Enter walks them
+const SF = { q: '', hits: [], cur: -1 };
+function srcFindApply(jump) {
+  const code = $('code');
+  for (const m of code.querySelectorAll('mark.fm')) m.replaceWith(document.createTextNode(m.textContent));
+  SF.hits = []; SF.cur = -1;
+  const q = SF.q;
+  if (!q) { $('src-find-n').textContent = ''; return; }
+  const fold = q === q.toLowerCase();  // all lower case: match any case
+  const walker = document.createTreeWalker(code, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) if (!n.parentElement.classList.contains('no')) nodes.push(n);
+  for (const n of nodes) {
+    n.parentElement.normalize();
+    const text = n.nodeValue, hay = fold ? text.toLowerCase() : text;
+    let i = hay.indexOf(q);
+    if (i < 0) continue;
+    const frag = document.createDocumentFragment();
+    let pos = 0;
+    while (i >= 0) {
+      if (i > pos) frag.append(text.slice(pos, i));
+      const mark = document.createElement('mark'); mark.className = 'fm'; mark.textContent = text.slice(i, i + q.length);
+      frag.append(mark);
+      SF.hits.push({ el: mark, line: +(mark.closest('.ln') || n.parentElement.closest('.ln') || { dataset: {} }).dataset.l || 0 });
+      pos = i + q.length;
+      i = hay.indexOf(q, pos);
+    }
+    if (pos < text.length) frag.append(text.slice(pos));
+    n.replaceWith(frag);
+  }
+  for (const h of SF.hits) h.line = +(h.el.closest('.ln') || { dataset: { l: 0 } }).dataset.l;
+  if (!SF.hits.length) { $('src-find-n').textContent = 'no match'; return; }
+  if (jump) {
+    // the first match at or after the current line
+    const at = SF.hits.findIndex((h) => h.line >= (SRC.line || 1));
+    srcFindGo(0, at >= 0 ? at : 0);
+  } else $('src-find-n').textContent = `${SF.hits.length}`;
+}
+function srcFindGo(dir, to) {
+  if (!SF.hits.length) { if (SF.q) $('src-find-n').textContent = 'no match'; return; }
+  const n = SF.hits.length;
+  SF.cur = to !== undefined ? to : (SF.cur + dir + n) % n;
+  $('code').querySelectorAll('mark.fm.cur').forEach((m) => m.classList.remove('cur'));
+  const h = SF.hits[SF.cur];
+  h.el.classList.add('cur');
+  const box = $('code');
+  const top = h.el.closest('.ln').offsetTop - box.clientHeight / 3;
+  box.scrollTop = Math.max(0, top);
+  $('src-find-n').textContent = `${SF.cur + 1}/${n}`;
+}
+$('src-find').addEventListener('input', () => { SF.q = $('src-find').value; srcFindApply(true); });
+$('src-find').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); srcFindGo(e.shiftKey ? -1 : 1); }
+  else if (e.key === 'Escape') { e.preventDefault(); $('src-find').value = ''; SF.q = ''; srcFindApply(false); $('code').focus(); }
+  e.stopPropagation();
+});
+$('srcpane').addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f' && e.target !== $('src-find')) { e.preventDefault(); e.stopPropagation(); $('src-find').focus(); $('src-find').select(); }
+}, true);
 
 function markLines() {
   const code = $('code');

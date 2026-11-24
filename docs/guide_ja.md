@@ -367,6 +367,7 @@ waveview.py serve w.fst --rtl core/filelist.f --rtl core/tb/top
 | パンくずリスト | 上位階層へ |
 | ◀ ▶ / Alt+← → | 履歴 |
 | `S` | ソースペインの表示切り替え |
+| ソースペインで Ctrl+F | 表示中ファイルの文字列検索 (Enter で次、Shift+Enter で前、Esc で解除)。小文字だけなら大文字小文字を区別しない |
 
 - **Active Annotation**: ソース中の各信号の横に、カーソル時刻の値を表示する。
   カーソルを動かすと追従し、そのクロックで値が変わった信号は黄色、x/z は赤
