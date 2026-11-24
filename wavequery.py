@@ -52,8 +52,10 @@ Examples:
 
 FST is read in place and on demand (wavesource.py and fstsrv.c):
 opening reads only the hierarchy, and each query decompresses only the
-signals and time range it needs, so dump size does not matter. VCD (and
-FSDB through fsdb2vcd) is read into memory with wave2img.py's parser.
+signals and time range it needs, so dump size does not matter. FSDB is read
+the same way where Verdi is installed (fsdbsrv.cc on its FsdbReader
+library). VCD (and FSDB without that library, through fsdb2vcd) is read
+into memory with wave2img.py's parser.
 A search over a long range evaluates only where its signals change.
 """
 
@@ -67,6 +69,7 @@ import json
 import os
 import pickle
 import re
+import shutil
 import sys
 import tempfile
 
@@ -1127,6 +1130,22 @@ def run_selftest():
         w = load(fst)
         check("fst: read lazily", ["info", fst], lambda t: getattr(w, "lazy", False), record=False)
         w.close()
+        # an FSDB goes through fsdbsrv, which speaks the same protocol: with
+        # no Verdi here, fstsrv on a copy of the FST stands in for it
+        fsdb = os.path.join(tmp, "selftest.fsdb")
+        shutil.copyfile(fst, fsdb)
+        old = os.environ.get("WAVEVIEW_FSDBSRV")
+        os.environ["WAVEVIEW_FSDBSRV"] = w2i.build_fst_tool("fstsrv", verbose=False)
+        try:
+            w = load(fsdb)
+            check("fsdb: read in place through the wave server", ["info", fsdb],
+                  lambda t: getattr(w, "tool", "") == "fsdbsrv" and "tb_wave.dut.data" in w.by_name, record=False)
+            w.close()
+        finally:
+            if old is None:
+                os.environ.pop("WAVEVIEW_FSDBSRV", None)
+            else:
+                os.environ["WAVEVIEW_FSDBSRV"] = old
 
     print("selftest: %s" % ("PASS" if failures == 0 else "%d FAILED" % failures))
     return 0 if failures == 0 else 1

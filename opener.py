@@ -12,12 +12,27 @@ import shlex
 import shutil
 import string
 import subprocess
+import sys
 
 import remote
 
 DRIVES = "*"  # the "directory" above C:\ on Windows
 LOCAL_DUMPS = (".fst", ".vcd", ".fsdb")
 MAX_ENTRIES = 5000
+MAC = sys.platform == "darwin"
+
+# Chromium browsers on macOS: app bundle, executable inside it
+MAC_BROWSERS = (
+    ("Google Chrome.app", "Google Chrome"),
+    ("Microsoft Edge.app", "Microsoft Edge"),
+    ("Chromium.app", "Chromium"),
+    ("Brave Browser.app", "Brave Browser"),
+)
+
+
+def local_name():
+    """What the Open dialog calls this machine."""
+    return "This PC" if os.name == "nt" else "This Mac" if MAC else "This machine"
 
 # the host goes on the ssh command line: it must never read as an option
 _HOST = re.compile(r"^(?:\w[\w.-]*@)?\w[\w.-]*(?::\d+)?$")
@@ -133,6 +148,12 @@ def find_browser():
                 if os.path.isfile(os.path.join(root, rel)):
                     return os.path.join(root, rel)
         return None
+    if MAC:
+        for root in ("/Applications", os.path.expanduser("~/Applications")):
+            for app, exe in MAC_BROWSERS:
+                path = os.path.join(root, app, "Contents", "MacOS", exe)
+                if os.path.isfile(path):
+                    return path
     for name in ("google-chrome", "chromium", "chromium-browser", "microsoft-edge"):
         if shutil.which(name):
             return shutil.which(name)
@@ -168,3 +189,33 @@ def show_console():
         import ctypes
 
         ctypes.windll.user32.ShowWindow(ctypes.windll.kernel32.GetConsoleWindow(), 5)
+
+
+def wait_for_quit(url):
+    """The macOS app without a Chromium browser: the viewer is in the default
+    browser, which gives no sign when its tab closes, so a dialog is what
+    the user quits. Returns when they do (or the dialog is gone)."""
+    subprocess.run(["osascript", "-e", "on run argv",
+                    "-e", 'display dialog "waveview is running in your browser at " & (item 1 of argv) & '
+                          '"\\n\\nNo Chrome or Edge was found for a window of its own. Quit stops the viewer." '
+                          'with title "waveview" buttons {"Quit"} default button 1',
+                    "-e", "end run", url],
+                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def report_error(text):
+    """An error from the packaged app started by a double click. On macOS the
+    app bundle has no console, so it goes in a dialog; elsewhere the console
+    stays open until Enter."""
+    print("error: %s" % text, file=sys.stderr)
+    if MAC and (sys.stdin is None or not sys.stdin.isatty()):
+        subprocess.run(["osascript", "-e", "on run argv",
+                        "-e", 'display dialog (item 1 of argv) with title "waveview" buttons {"OK"} '
+                              "default button 1 with icon stop",
+                        "-e", "end run", text],
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return
+    try:
+        input("Press Enter to close...")
+    except EOFError:
+        pass

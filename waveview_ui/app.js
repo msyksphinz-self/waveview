@@ -1755,7 +1755,7 @@ function followSource(st) {
 // Open dialog: this PC or a host of ~/.ssh/config, then a folder, then a dump
 // ---------------------------------------------------------------------------
 
-const OP = { host: '', path: '', file: null, seq: 0, hosts: false, hasDump: false, busy: false };
+const OP = { host: '', path: '', file: null, seq: 0, hosts: false, hasDump: false, busy: false, local: 'This PC' };
 const OTHER_HOST = '\u0000other';
 
 function opRemembered(key) { try { return localStorage.getItem('wv-open-' + key) || ''; } catch (e) { return ''; } }
@@ -1804,7 +1804,7 @@ async function opList(host, path) {
       $('op-list').append(row);
     }
     const files = d.entries.filter((e) => !e.dir).length;
-    opMsg(`${host || 'This PC'}: ${files} waveform file${files === 1 ? '' : 's'} here` + (d.more ? ' (list cut short)' : ''));
+    opMsg(`${host || OP.local}: ${files} waveform file${files === 1 ? '' : 's'} here` + (d.more ? ' (list cut short)' : ''));
   } catch (err) {
     if (seq !== OP.seq) return;
     opMsg(err.message + (host ? '  (ssh must log in without a prompt: a key with ssh-agent, and a known host key)' : ''), true);
@@ -1845,9 +1845,13 @@ async function showOpen() {
   if (OP.hosts) return;
   OP.hosts = true;
   let hosts = [];
-  try { hosts = (await api('/api/hosts')).hosts; } catch (e) { /* no ssh config */ }
+  try {
+    const r = await api('/api/hosts');
+    hosts = r.hosts;
+    if (r.local) OP.local = r.local;
+  } catch (e) { /* no ssh config */ }
   const sel = $('op-host');
-  sel.replaceChildren(new Option('This PC', ''), ...hosts.map((h) => new Option(h, h)), new Option('Other host…', OTHER_HOST));
+  sel.replaceChildren(new Option(OP.local, ''), ...hosts.map((h) => new Option(h, h)), new Option('Other host…', OTHER_HOST));
   const last = opRemembered('host');
   if (hosts.includes(last)) sel.value = last;
   opHostChanged();
