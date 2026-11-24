@@ -1147,6 +1147,32 @@ def run_selftest():
             else:
                 os.environ["WAVEVIEW_FSDBSRV"] = old
 
+    # a real FSDB, where Verdi is installed: vcd2fsdb writes one from the
+    # VCD and fsdbsrv, built against the FsdbReader library, reads it back
+    home = w2i.verdi_home()
+    v2f = os.path.join(home, "bin", "vcd2fsdb") if home else None
+    reader = w2i.build_fsdb_tool(verbose=True) if v2f and os.path.isfile(v2f) else None
+    if reader is None:
+        print("skip Verdi FSDB checks: needs Verdi (VERDI_HOME) with vcd2fsdb and the FsdbReader library")
+    else:
+        import subprocess
+
+        real = os.path.join(tmp, "verdi.fsdb")
+        done = subprocess.run(w2i.script_argv(v2f) + [path, "-o", real], capture_output=True, text=True, cwd=tmp)
+        if done.returncode != 0 or not os.path.isfile(real):
+            failures += 1
+            print("FAIL verdi fsdb: vcd2fsdb failed (exit %d)\n%s"
+                  % (done.returncode, (done.stderr or done.stdout).strip()[-2000:]))
+        else:
+            for label, argv, test in cases:
+                if "cache" in label:
+                    continue
+                check("verdi fsdb: " + label, [real if x == path else x for x in argv], test, record=False)
+            w = load(real)
+            check("verdi fsdb: read in place by fsdbsrv", ["info", real],
+                  lambda t: getattr(w, "tool", "") == "fsdbsrv", record=False)
+            w.close()
+
     print("selftest: %s" % ("PASS" if failures == 0 else "%d FAILED" % failures))
     return 0 if failures == 0 else 1
 
@@ -1246,4 +1272,8 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # run as the module wavesource.py imports: run as __main__ there would be
+    # two QueryError classes, and an error of the lazy reader a traceback
+    import wavequery
+
+    sys.exit(wavequery.main())

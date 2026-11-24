@@ -18,9 +18,10 @@
  * only the scope/variable tree. Real, string and transaction variables are
  * not served; a variable whose values are not one byte per bit shows as x.
  *
- * The FsdbReader library writes log lines to stdout. The protocol therefore
- * goes to a duplicate of the original stdout, and file descriptor 1 is
- * pointed at a scratch file before the library is touched.
+ * The FsdbReader library writes log lines to stdout and a banner to stderr.
+ * The protocol therefore goes to a duplicate of the original stdout, and
+ * file descriptors 1 and 2 are pointed at a scratch file before the library
+ * is touched (FSDBSRV_VERBOSE=1 leaves stderr alone).
  */
 
 #ifdef NOVAS_FSDB
@@ -37,6 +38,14 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+/* ffrAPI.h uses bool_T but leaves TRUE / FALSE to the application */
+#ifndef FALSE
+#define FALSE 0
+#endif
+#ifndef TRUE
+#define TRUE 1
+#endif
 
 #define MAX_LINE (1 << 20)
 #define MAX_DEPTH 1024
@@ -321,12 +330,19 @@ static int parse_handles(char **tok, int n, fsdbVarIdcode *hl)
     return k;
 }
 
-static void load(fsdbVarIdcode *hl, int nh)
+static int load(fsdbVarIdcode *hl, int nh)
 {
     fsdb->ffrResetSignalList();
+    if (nh == 0)
+        return 1;
     for (int i = 0; i < nh; i++)
         fsdb->ffrAddToSignalList(hl[i]);
-    fsdb->ffrLoadSignals();
+    if (fsdb->ffrLoadSignals() != FSDB_RC_SUCCESS) {
+        fsdb->ffrResetSignalList();
+        fprintf(out, "! the FSDB reader could not load the value changes\n");
+        return 0;
+    }
+    return 1;
 }
 
 static void unload(void)
@@ -337,7 +353,8 @@ static void unload(void)
 
 static void run_query(fsdbVarIdcode *hl, int nh)
 {
-    load(hl, nh);
+    if (!load(hl, nh))
+        return;
     for (int i = 0; i < nh; i++)
         serve_one(hl[i]);
     unload();
@@ -346,7 +363,8 @@ static void run_query(fsdbVarIdcode *hl, int nh)
 
 static void run_at(uint64_t t, fsdbVarIdcode *hl, int nh)
 {
-    load(hl, nh);
+    if (!load(hl, nh))
+        return;
     for (int i = 0; i < nh; i++) {
         fsdbVarIdcode h = hl[i];
         struct hstate *s = &hs[h];
@@ -382,6 +400,10 @@ int main(int argc, char **argv)
         return 2;
     }
     dup2(fileno(scratch), 1);
+    /* the banner and *WARN* lines go to stderr: the same scratch file, as
+     * every failure is reported in the protocol. FSDBSRV_VERBOSE keeps them */
+    if (!getenv("FSDBSRV_VERBOSE"))
+        dup2(fileno(scratch), 2);
     out = fdopen(proto_fd, "w");
     setvbuf(out, NULL, _IOFBF, 1 << 16);
 
@@ -403,7 +425,8 @@ int main(int argc, char **argv)
         fflush(out);
         return 1;
     }
-    fsdb->ffrReadDataTypeDefByBlkIdx(0); /* keeps transaction data from tripping the reader */
+    uint_T blk_idx = 0;
+    fsdb->ffrReadDataTypeDefByBlkIdx(blk_idx); /* keeps transaction data from tripping the reader */
 
     fsdbTag64 tag;
     t_min = fsdb->ffrGetMinFsdbTag64(&tag) == FSDB_RC_SUCCESS ? T2U64(tag) : 0;
@@ -413,18 +436,27 @@ int main(int argc, char **argv)
     width_of = (uint32_t *)calloc((size_t)max_id + 1, sizeof(*width_of));
     hs = (struct hstate *)calloc((size_t)max_id + 1, sizeof(*hs));
     valbuf = (char *)malloc(1 << 20);
+    char *line = (char *)malloc(MAX_LINE);
+    char **tok = (char **)malloc(sizeof(char *) * (MAX_LINE / 2));
+    fsdbVarIdcode *hl = (fsdbVarIdcode *)malloc(sizeof(fsdbVarIdcode) * (MAX_LINE / 2));
+    if (!width_of || !hs || !valbuf || !line || !tok || !hl) {
+        fprintf(out, "! out of memory for %s (%ld variables)\n", argv[1], (long)max_id);
+        fflush(out);
+        return 1;
+    }
 
     fprintf(out, "wavesrv 1\n");
     fprintf(out, "timescale %d\n", timescale_exp());
     fprintf(out, "range %" PRIu64 " %" PRIu64 "\n", t_min, t_max);
     fsdb->ffrSetTreeCBFunc(tree_cb, NULL);
-    fsdb->ffrReadScopeVarTree();
+    if (fsdb->ffrReadScopeVarTree() != FSDB_RC_SUCCESS) {
+        fprintf(out, "! the FSDB reader could not read the scope tree of %s\n", argv[1]);
+        fflush(out);
+        return 1;
+    }
     fprintf(out, "end\n");
     fflush(out);
 
-    char *line = (char *)malloc(MAX_LINE);
-    char **tok = (char **)malloc(sizeof(char *) * (MAX_LINE / 2));
-    fsdbVarIdcode *hl = (fsdbVarIdcode *)malloc(sizeof(fsdbVarIdcode) * (MAX_LINE / 2));
     while (fgets(line, MAX_LINE, stdin)) {
         int n = 0;
         for (char *p = strtok(line, " \t\r\n"); p; p = strtok(NULL, " \t\r\n"))
