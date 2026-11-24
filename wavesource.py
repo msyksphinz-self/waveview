@@ -18,6 +18,12 @@ for VCD), which is what wavequery and waveview program against:
     edges(clock)                          rising edges (arithmetic when regular)
     clock_candidates() change_count(sig)
 
+A dump with tens of millions of signals takes minutes just to list. Two
+ways around that: open_lazy(path, scope=[...]) has the server list only what
+is below some scopes, and a local FSDB too large to list keeps its names in
+an index on disk (nameindex.py): signals and by_name are then looked up
+there, and the server reads only the scopes of the dump.
+
 Values are fetched in aligned chunks and cached, so stepping through cycles
 (find, table) costs one read per chunk per signal, not one per cycle.
 """
@@ -33,6 +39,7 @@ import threading
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+import nameindex  # noqa: E402
 import wave2img as w2i  # noqa: E402
 import wavequery as wq  # noqa: E402
 
@@ -68,14 +75,37 @@ class LazyFst(wq.Wave):
 
     lazy = True
 
-    def __init__(self, path, argv=None, tool="fstsrv"):
+    def __init__(self, path, argv=None, tool="fstsrv", scope=None, plan=None):
+        """scope: list only the signals below these scopes. plan: a
+        nameindex.Plan, for a dump whose names are kept on disk when there
+        are too many to hold (fsdbsrv only)."""
         if argv is None:
             binary = w2i.build_fst_tool("fstsrv", verbose=True)
             if binary is None:
                 raise wq.QueryError("cannot build fstsrv.c (needs a C compiler and Verilator's FST library)")
-            argv = [binary, path]
+            argv = [binary, path] + scope_args(scope)
         self.path = path
         self.tool = tool
+        self.names = None
+        meta = plan.ready() if plan is not None else None
+        if meta is not None:
+            argv = argv + ["--no-tree", str(meta["scope_count"])]
+        elif plan is not None:
+            argv = argv + ["--index", plan.names_tmp(), "--index-min", str(nameindex.min_signals())]
+        try:
+            self._start(path, argv, tool, scope, plan, meta)
+        except BaseException:
+            proc = getattr(self, "proc", None)
+            if proc is not None and proc.poll() is None:  # do not leave the server behind
+                proc.kill()
+                proc.wait()
+            if plan is not None:
+                plan.discard()
+                if meta is not None:
+                    plan.remove()  # the index did not work: the next open writes it again
+            raise
+
+    def _start(self, path, argv, tool, scope, plan, meta):
         self.proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      text=True, bufsize=1 << 16, encoding="ascii", errors="replace")
         self.io = threading.Lock()
@@ -88,6 +118,7 @@ class LazyFst(wq.Wave):
         exp = 0
         width_of = {}
         ended = False
+        built = None
         for line in self.proc.stdout:
             line = line.rstrip("\n")
             if line == "end":
@@ -106,18 +137,45 @@ class LazyFst(wq.Wave):
                 h, w = int(h), int(w)
                 width_of[h] = w
                 dump.signals.append(w2i.Signal(name, w, h, len(dump.signals)))
+            elif kind == "index":  # the names went to the plan's file
+                built = {"signals": int(rest.split()[0]), "scope_count": int(rest.split()[1]), "scopes": {},
+                         "clocks": []}
+            elif kind == "scope" and built is not None:
+                n, _, name = rest.partition(" ")
+                built["scopes"][name] = built["scopes"].get(name, 0) + int(n)
+            elif kind == "clock" and built is not None:
+                h, o, name = rest.split(" ", 2)
+                built["clocks"].append([int(h), int(o), name])
         if not ended:
             raise wq.QueryError("%s stopped while listing the signals of %s" % (tool, path))
+        if built is not None:
+            meta = plan.publish(built)
+        elif plan is not None:
+            plan.discard()
+        if scope and not dump.signals:
+            raise wq.QueryError("no signal below the scope %s in %s\nhint: `info` without --scope shows the first "
+                                "levels of the hierarchy" % (", ".join(scope), path))
         dump.timescale = _timescale(exp)
         if dump.end_time <= dump.start_time:
             dump.end_time = dump.start_time + 1
         super().__init__(dump)
         self.width_of = width_of
+        if meta is not None:
+            # too many signals to hold: names are looked up in the index
+            self.names = nameindex.NameIndex(plan.dir, meta)
+            self.signals = nameindex.Signals(self.names)
+            self.by_name = nameindex.ByName(self.names)
+            self.width_of = self.names.width_of
+            # scope numbers the server has read the variables of: all of them
+            # when it has just listed the dump to write the index
+            self.declared = None if built is not None else set()
         span = max(1, (self.end_time - self.start_time) // 65536)
         self.chunk = 1 << max(10, span.bit_length())
         self.cache = collections.OrderedDict()  # (code, k) -> (prior, times, values)
 
     def close(self):
+        if self.names is not None:
+            self.names.close()
         try:
             with self.io:
                 self.proc.stdin.write("quit\n")
@@ -158,12 +216,22 @@ class LazyFst(wq.Wave):
                 out.append(line)
             raise wq.QueryError("%s stopped (dump %s)" % (self.tool, self.path))
 
+    def _handles(self, codes):
+        """The handles of a command. A server that read only the scopes (the
+        names are in the index) is first told which scopes declare them."""
+        if self.names is not None and self.declared is not None:
+            need = sorted({self.names.scope_of.get(c, 0) for c in codes} - self.declared - {0})
+            if need:
+                self._ask("vars " + " ".join(str(o) for o in need))
+                self.declared.update(need)
+        return " ".join(str(c) for c in codes)
+
     def _read(self, codes, t0, t1):
         """{code: (prior, [times], [values])} for [t0, t1]."""
         out = {c: [("x" * self.width_of.get(c, 1)), [], []] for c in codes}
         if not codes:
             return out
-        for line in self._ask("read %d %d %s" % (t0, t1, " ".join(str(c) for c in codes))):
+        for line in self._ask("read %d %d %s" % (t0, t1, self._handles(codes))):
             if line[0] == "c":
                 _, t, h, v = line.split(" ")
                 e = out[int(h)]
@@ -270,7 +338,7 @@ class LazyFst(wq.Wave):
         codes = sorted({s.code for s in sigs})
         res = {c: ["x" * self.width_of.get(c, 1), []] for c in codes}
         if codes:
-            for line in self._ask("agg %d %d %d %s" % (ts, level, n, " ".join(str(c) for c in codes))):
+            for line in self._ask("agg %d %d %d %s" % (ts, level, n, self._handles(codes))):
                 f = line.split(" ")
                 if f[0] == "b":
                     res[int(f[1])][1].append((int(f[2]), int(f[3]), int(f[4]), int(f[5]), int(f[6]), f[7]))
@@ -326,7 +394,7 @@ class LazyFst(wq.Wave):
 
     def clock_candidates(self):
         by_code = {}
-        for s in self.signals:
+        for s in self.signals if self.names is None else self.names.clocks():
             if s.width != 1:
                 continue
             leaf = s.name.split(".")[-1].lower()
@@ -351,14 +419,14 @@ class RemoteFst(LazyFst):
     """An FST or FSDB on another machine, read through fstsrv or fsdbsrv
     running there, over ssh (remote.py)."""
 
-    def __init__(self, spec, tool="fstsrv"):
+    def __init__(self, spec, tool="fstsrv", scope=None):
         import remote
 
         r, path = remote.parse(spec)
         self.remote = r
         for attempt in (0, 1):
             try:
-                super().__init__(spec, argv=r.srv_argv(path, tool), tool=tool)
+                super().__init__(spec, argv=r.srv_argv(path, tool, scope_args(scope)), tool=tool, scope=scope)
                 return
             except remote.RemoteError as exc:
                 raise wq.QueryError(str(exc))
@@ -369,23 +437,38 @@ class RemoteFst(LazyFst):
                 r.forget_srv(tool)
 
 
-def open_lazy(path):
-    """A lazy source for path, or None when this format has none here."""
+def scope_args(scope):
+    out = []
+    for s in scope or ():
+        out += ["--scope", s]
+    return out
+
+
+def open_lazy(path, scope=None, index=True):
+    """A lazy source for path, or None when this format has none here.
+    scope: only the signals below these scopes are listed. index: a dump
+    with very many signals keeps its names on disk (nameindex.py)."""
     import remote
 
     ext = os.path.splitext(path)[1].lower()
     if remote.is_remote(path):
         if ext == ".fst":
-            return RemoteFst(path)
+            return RemoteFst(path, scope=scope)
         if ext == ".fsdb":
-            return RemoteFst(path, tool="fsdbsrv")
+            return RemoteFst(path, tool="fsdbsrv", scope=scope)
         raise wq.QueryError("remote dumps are served for FST and FSDB only (convert or dump FST on the server)")
     if os.environ.get("WAVE_EAGER") == "1":
         return None
     if ext == ".fst":
-        return LazyFst(path)
+        return LazyFst(path, scope=scope)
     if ext == ".fsdb":
         binary = w2i.build_fsdb_tool(verbose=True)
         if binary is not None:
-            return LazyFst(path, argv=[binary, path], tool="fsdbsrv")
+            argv = [binary, path] + scope_args(scope)
+            if index and not scope and nameindex.enabled() and not os.environ.get("WAVEVIEW_FSDBSRV"):
+                try:
+                    return LazyFst(path, argv=argv, tool="fsdbsrv", plan=nameindex.Plan(path))
+                except (OSError, ValueError, wq.QueryError) as exc:
+                    sys.stderr.write("wavesource: no name index for %s (%s), listing the signals\n" % (path, exc))
+            return LazyFst(path, argv=argv, tool="fsdbsrv", scope=scope)
     return None

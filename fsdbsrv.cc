@@ -18,6 +18,41 @@
  * only the scope/variable tree. Real, string and transaction variables are
  * not served; a variable whose values are not one byte per bit shows as x.
  *
+ * Options, after the dump:
+ *   --scope A.B.C   list only the variables below that scope (or that one
+ *                   variable); may be given several times
+ *   --index FILE --index-min N
+ *                   a dump with N variable idcodes or more is not listed in
+ *                   the protocol: its names go to FILE (the format is below)
+ *                   and the header says "index <variables> <scopes>"
+ *                   instead, with "scope <variables> <path>" and
+ *                   "clock <id> <scope number> <name>" lines for the
+ *                   summary. wavesource.py keeps the file and looks names up
+ *                   in it (nameindex.py)
+ *   --no-tree N     the client has that index, of a dump with N scopes: only
+ *                   the scopes are read (seconds where the variables take
+ *                   minutes to list), and before values are asked for the
+ *                   client names the scopes of the variables:
+ *                       vars <scope number> [<scope number>...]
+ *                       .
+ *                   The library cannot decode a variable it has not read
+ *                   the declaration of, and reads those a scope at a time.
+ *                   Scopes are numbered from 1 in the order of the tree: the
+ *                   place the library reads a scope's variables from is not
+ *                   a file offset in every FSDB, so it cannot be kept
+ *
+ * The names file is the scope tree in the order it is stored:
+ *   +name           enter a scope (the n-th such line is scope number n)
+ *   *name           enter a struct: part of a name, not a scope of its own
+ *   -               leave either
+ *   id width name   a variable
+ *   @n<TAB>c<TAB>a<TAB>b<TAB>*s
+ *                   where the next line is: in scope number n (0: none), c
+ *                   scopes entered so far, and the names in full. Written
+ *                   after a "-" before a variable or a struct, and about
+ *                   every 16 KB, so that the place of any line is found by
+ *                   reading back a little
+ *
  * The FsdbReader library writes log lines to stdout and a banner to stderr.
  * The protocol therefore goes to a duplicate of the original stdout, and
  * file descriptors 1 and 2 are pointed at a scratch file before the library
@@ -69,6 +104,15 @@ struct hstate {
 };
 static struct hstate *hs;
 
+/* options */
+#define MAX_SCOPES 64
+static const char *want_scope[MAX_SCOPES];
+static int n_want;
+static int no_tree;
+static uint64_t expect_scopes;
+static const char *index_path;
+static uint64_t index_min;
+
 static int mode_agg;
 static uint64_t q_t0, q_t1;
 static int q_level;
@@ -79,8 +123,177 @@ static char path[MAX_LINE];
 static size_t depth_len[MAX_DEPTH];
 static int depth;
 
-static void push_scope(const char *name)
+static int match_depth = -1; /* depth of the scope --scope named, -1 outside */
+static int declaring;        /* reading the variables of one scope for "vars" */
+
+/* --no-tree: where the library reads the variables of each scope from */
+static fsdbLUOff *scope_off;
+static char *scope_read;
+static uint64_t n_scope_off, cap_scope_off;
+
+static bool_T scopes_cb(fsdbTreeCBType cb_type, void *client_data, void *tree_cb_data)
 {
+    (void)client_data;
+    if (cb_type != FSDB_TREE_CBT_SCOPE)
+        return TRUE;
+    if (n_scope_off + 1 >= cap_scope_off) {
+        cap_scope_off = cap_scope_off ? cap_scope_off * 2 : 4096;
+        scope_off = (fsdbLUOff *)realloc(scope_off, cap_scope_off * sizeof(*scope_off));
+        if (!scope_off) {
+            fprintf(out, "! out of memory for the scopes\n");
+            fflush(out);
+            exit(1);
+        }
+    }
+    scope_off[++n_scope_off] = ((fsdbTreeCBDataScope *)tree_cb_data)->var_start_log_uoff;
+    return TRUE;
+}
+static uint64_t n_listed;
+
+/* -- the names file (--index) ---------------------------------------------- */
+
+#define CHECKPOINT (16 * 1024)
+#define MAX_CLOCKS 16
+static FILE *idx;
+static long idx_since;     /* bytes since the last "@" line */
+static int idx_after_pop;
+static uint64_t n_scopes;                /* "+" lines so far */
+static uint64_t ord_at[MAX_DEPTH + 1];   /* the scope number at each depth */
+static char kind_at[MAX_DEPTH + 1];      /* '+' or '*' of the name at each depth */
+struct bucket {
+    char *key;
+    uint64_t n;
+};
+static struct bucket *buckets; /* variables per scope of the first three levels */
+static size_t n_buckets, cap_buckets;
+static size_t bucket_at[4];
+struct clock_cand {
+    fsdbVarIdcode id;
+    uint64_t ord;
+    size_t len;
+    char *name;
+};
+static struct clock_cand clocks[MAX_CLOCKS];
+static int n_clocks;
+
+static size_t new_bucket(const char *key)
+{
+    if (n_buckets == cap_buckets) {
+        cap_buckets = cap_buckets ? cap_buckets * 2 : 256;
+        buckets = (struct bucket *)realloc(buckets, cap_buckets * sizeof(*buckets));
+        if (!buckets) {
+            fprintf(out, "! out of memory\n");
+            fflush(out);
+            exit(1);
+        }
+    }
+    buckets[n_buckets].key = strdup(key);
+    buckets[n_buckets].n = 0;
+    return n_buckets++;
+}
+
+/* "@" and the current scope, its names separated by tabs */
+static void idx_checkpoint(void)
+{
+    int d = depth < MAX_DEPTH ? depth : MAX_DEPTH;
+    fprintf(idx, "@%" PRIu64 "\t%" PRIu64, ord_at[d], n_scopes);
+    for (int i = 0; i < d; i++) {
+        size_t a = depth_len[i] + (i ? 1 : 0);
+        size_t b = i + 1 < d ? depth_len[i + 1] : strlen(path);
+        fputc('\t', idx);
+        if (kind_at[i + 1] == '*')
+            fputc('*', idx);
+        fwrite(path + a, 1, b > a ? b - a : 0, idx);
+    }
+    fputc('\n', idx);
+    idx_since = 0;
+    idx_after_pop = 0;
+}
+
+static int has_clock_name(const char *name)
+{
+    char low[64];
+    size_t n = strlen(name);
+    if (n >= sizeof(low))
+        n = sizeof(low) - 1;
+    for (size_t i = 0; i < n; i++)
+        low[i] = (char)tolower((unsigned char)name[i]);
+    low[n] = 0;
+    return strstr(low, "clk") || strstr(low, "clock");
+}
+
+/* keep the MAX_CLOCKS clock-like variables with the shortest names */
+static void note_clock(fsdbVarIdcode id, const char *name)
+{
+    size_t len = strlen(path) + 1 + strlen(name);
+    int at = -1;
+    for (int i = 0; i < n_clocks; i++)
+        if (clocks[i].id == id) {
+            if (clocks[i].len <= len)
+                return;
+            at = i;
+        }
+    if (at < 0) {
+        if (n_clocks < MAX_CLOCKS) {
+            at = n_clocks++;
+            clocks[at].name = NULL;
+        } else {
+            at = 0;
+            for (int i = 1; i < n_clocks; i++)
+                if (clocks[i].len > clocks[at].len)
+                    at = i;
+            if (clocks[at].len <= len)
+                return;
+        }
+    }
+    free(clocks[at].name);
+    clocks[at].name = (char *)malloc(len + 1);
+    if (!clocks[at].name) {
+        clocks[at].len = (size_t)-1;
+        clocks[at].id = 0;
+        return;
+    }
+    snprintf(clocks[at].name, len + 1, "%s%s%s", path, path[0] ? "." : "", name);
+    clocks[at].id = id;
+    clocks[at].ord = ord_at[depth < MAX_DEPTH ? depth : MAX_DEPTH];
+    clocks[at].len = len;
+}
+
+/* -- the scope tree -------------------------------------------------------- */
+
+static int in_scope(const char *leaf)
+{
+    if (!n_want || match_depth >= 0)
+        return 1;
+    if (!leaf)
+        return 0;
+    size_t pl = strlen(path);
+    for (int i = 0; i < n_want; i++) {
+        const char *w = want_scope[i];
+        if (pl == 0) {
+            if (!strcmp(w, leaf))
+                return 1;
+        } else if (!strncmp(w, path, pl) && w[pl] == '.' && !strcmp(w + pl + 1, leaf)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void push_scope(const char *name, char kind)
+{
+    if (idx) {
+        if (idx_since >= CHECKPOINT || (idx_after_pop && kind == '*'))
+            idx_checkpoint();
+        idx_since += fprintf(idx, "%c%s\n", kind, name ? name : "");
+        idx_after_pop = 0;
+        if (kind == '+')
+            n_scopes++;
+        if (depth < MAX_DEPTH) {
+            ord_at[depth + 1] = kind == '+' ? n_scopes : ord_at[depth];
+            kind_at[depth + 1] = kind;
+        }
+    }
     size_t len = strlen(path);
     if (depth < MAX_DEPTH)
         depth_len[depth] = len;
@@ -88,14 +301,28 @@ static void push_scope(const char *name)
     if (len)
         strncat(path, ".", sizeof(path) - strlen(path) - 1);
     strncat(path, name ? name : "", sizeof(path) - strlen(path) - 1);
+    if (n_want && match_depth < 0)
+        for (int i = 0; i < n_want; i++)
+            if (!strcmp(want_scope[i], path)) {
+                match_depth = depth;
+                break;
+            }
+    if (idx && depth <= 3)
+        bucket_at[depth] = new_bucket(path);
 }
 
 static void pop_scope(void)
 {
     if (depth > 0) {
+        if (idx) {
+            idx_since += fprintf(idx, "-\n");
+            idx_after_pop = 1;
+        }
         depth--;
         if (depth < MAX_DEPTH)
             path[depth_len[depth]] = 0;
+        if (match_depth > depth)
+            match_depth = -1;
     }
 }
 
@@ -113,8 +340,6 @@ static void emit_var(fsdbTreeCBDataVar *var)
     fsdbVarIdcode id = var->u.idcode;
     if (id <= 0 || id > max_id)
         return;
-    uint32_t w = (uint32_t)(var->lbitnum >= var->rbitnum ? var->lbitnum - var->rbitnum : var->rbitnum - var->lbitnum) + 1;
-    width_of[id] = w;
     /* the name may carry the packed range: "data[7:0]"; a word of a memory,
      * "mem[3]", has no ':' and stays */
     char name[4096];
@@ -125,7 +350,25 @@ static void emit_var(fsdbTreeCBDataVar *var)
         if (lb && lb != name && strchr(lb, ':'))
             *lb = 0;
     }
-    fprintf(out, "var %u %u %s%s%s\n", (unsigned)id, w, path, path[0] ? "." : "", name);
+    if (declaring) { /* "vars": the library has read the declaration, that is all */
+        width_of[id] = (uint32_t)(var->lbitnum >= var->rbitnum ? var->lbitnum - var->rbitnum : var->rbitnum - var->lbitnum) + 1;
+        return;
+    }
+    if (!in_scope(name))
+        return;
+    uint32_t w = (uint32_t)(var->lbitnum >= var->rbitnum ? var->lbitnum - var->rbitnum : var->rbitnum - var->lbitnum) + 1;
+    width_of[id] = w;
+    n_listed++;
+    if (!idx) {
+        fprintf(out, "var %u %u %s%s%s\n", (unsigned)id, w, path, path[0] ? "." : "", name);
+        return;
+    }
+    if (idx_after_pop || idx_since >= CHECKPOINT)
+        idx_checkpoint();
+    idx_since += fprintf(idx, "%u %u %s\n", (unsigned)id, w, name);
+    buckets[bucket_at[depth < 3 ? depth : 3]].n++;
+    if (w == 1 && has_clock_name(name))
+        note_clock(id, name);
 }
 
 static bool_T tree_cb(fsdbTreeCBType cb_type, void *client_data, void *tree_cb_data)
@@ -133,10 +376,10 @@ static bool_T tree_cb(fsdbTreeCBType cb_type, void *client_data, void *tree_cb_d
     (void)client_data;
     switch (cb_type) {
     case FSDB_TREE_CBT_SCOPE:
-        push_scope(((fsdbTreeCBDataScope *)tree_cb_data)->name);
+        push_scope(((fsdbTreeCBDataScope *)tree_cb_data)->name, '+');
         break;
     case FSDB_TREE_CBT_STRUCT_BEGIN:
-        push_scope(((fsdbTreeCBDataStructBegin *)tree_cb_data)->name);
+        push_scope(((fsdbTreeCBDataStructBegin *)tree_cb_data)->name, '*');
         break;
     case FSDB_TREE_CBT_UPSCOPE:
     case FSDB_TREE_CBT_STRUCT_END:
@@ -388,8 +631,23 @@ static void run_at(uint64_t t, fsdbVarIdcode *hl, int nh)
 
 int main(int argc, char **argv)
 {
-    if (argc < 2) {
-        fprintf(stderr, "usage: fsdbsrv <dump.fsdb>\n");
+    int bad = argc < 2;
+    for (int i = 2; i < argc && !bad; i++) {
+        if (!strcmp(argv[i], "--scope") && i + 1 < argc && n_want < MAX_SCOPES)
+            want_scope[n_want++] = argv[++i];
+        else if (!strcmp(argv[i], "--index") && i + 1 < argc)
+            index_path = argv[++i];
+        else if (!strcmp(argv[i], "--index-min") && i + 1 < argc)
+            index_min = strtoull(argv[++i], NULL, 10);
+        else if (!strcmp(argv[i], "--no-tree") && i + 1 < argc) {
+            no_tree = 1;
+            expect_scopes = strtoull(argv[++i], NULL, 10);
+        }
+        else
+            bad = 1;
+    }
+    if (bad) {
+        fprintf(stderr, "usage: fsdbsrv <dump.fsdb> [--scope A.B.C]... [--index FILE --index-min N] [--no-tree N]\n");
         return 2;
     }
     /* keep the protocol away from the library's log lines */
@@ -448,11 +706,55 @@ int main(int argc, char **argv)
     fprintf(out, "wavesrv 1\n");
     fprintf(out, "timescale %d\n", timescale_exp());
     fprintf(out, "range %" PRIu64 " %" PRIu64 "\n", t_min, t_max);
+    if (index_path && !n_want && !no_tree && (uint64_t)max_id >= index_min) {
+        idx = fopen(index_path, "w");
+        if (!idx) {
+            fprintf(out, "! cannot write the name index %s\n", index_path);
+            fflush(out);
+            return 1;
+        }
+        setvbuf(idx, NULL, _IOFBF, 1 << 20);
+        fprintf(idx, "waveview-names 1\n");
+        bucket_at[0] = new_bucket("");
+        idx_checkpoint();
+    }
+    if (no_tree) {
+        fsdb->ffrSetTreeCBFunc(scopes_cb, NULL);
+        if (fsdb->ffrReadScopeTree() != FSDB_RC_SUCCESS || n_scope_off != expect_scopes) {
+            fprintf(out, "! the name index does not match %s (%" PRIu64 " scopes, the index has %" PRIu64 ")\n",
+                    argv[1], n_scope_off, expect_scopes);
+            fflush(out);
+            return 1;
+        }
+        scope_read = (char *)calloc((size_t)n_scope_off + 1, 1);
+        if (!scope_read) {
+            fprintf(out, "! out of memory for the scopes\n");
+            fflush(out);
+            return 1;
+        }
+        declaring = 1;
+    }
     fsdb->ffrSetTreeCBFunc(tree_cb, NULL);
-    if (fsdb->ffrReadScopeVarTree() != FSDB_RC_SUCCESS) {
+    if (!no_tree && fsdb->ffrReadScopeVarTree() != FSDB_RC_SUCCESS) {
         fprintf(out, "! the FSDB reader could not read the scope tree of %s\n", argv[1]);
         fflush(out);
         return 1;
+    }
+    if (idx) {
+        int failed = ferror(idx);
+        if (fclose(idx) != 0 || failed) {
+            fprintf(out, "! cannot write the name index %s (disk full?)\n", index_path);
+            fflush(out);
+            return 1;
+        }
+        idx = NULL;
+        fprintf(out, "index %" PRIu64 " %" PRIu64 "\n", n_listed, n_scopes);
+        for (size_t i = 0; i < n_buckets; i++)
+            if (buckets[i].n)
+                fprintf(out, "scope %" PRIu64 " %s\n", buckets[i].n, buckets[i].key);
+        for (int i = 0; i < n_clocks; i++)
+            if (clocks[i].id)
+                fprintf(out, "clock %u %" PRIu64 " %s\n", (unsigned)clocks[i].id, clocks[i].ord, clocks[i].name);
     }
     fprintf(out, "end\n");
     fflush(out);
@@ -479,6 +781,23 @@ int main(int argc, char **argv)
             q_t1 = q_t0 + (nb << q_level) - 1;
             int nh = parse_handles(tok + 4, n - 4, hl);
             run_query(hl, nh);
+        } else if (!strcmp(tok[0], "vars") && no_tree) {
+            const char *failed = NULL;
+            for (int i = 1; i < n && !failed; i++) {
+                uint64_t o = strtoull(tok[i], NULL, 10);
+                if (o == 0 || o > n_scope_off)
+                    failed = "no such scope";
+                else if (!scope_read[o]) {
+                    if (fsdb->ffrReadVarByLogUOff(&scope_off[o]) != FSDB_RC_SUCCESS)
+                        failed = "the FSDB reader could not read the variables of a scope";
+                    else
+                        scope_read[o] = 1;
+                }
+            }
+            if (failed)
+                fprintf(out, "! %s\n", failed);
+            else
+                fprintf(out, ".\n");
         } else if (!strcmp(tok[0], "stat")) {
             struct stat st;
             if (stat(argv[1], &st) == 0)

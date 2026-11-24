@@ -146,8 +146,9 @@ class Remote:
                               "WAVEVIEW_REMOTE_FSDBSRV at a built fsdbsrv" % self.host)
         raise RemoteError("building %s on %s failed:\n%s" % (tool, self.host, out))
 
-    def srv_argv(self, path, tool="fstsrv"):
-        return self.argv("%s %s" % (shlex.quote(self.srv(tool)), shlex.quote(path)), compress=True)
+    def srv_argv(self, path, tool="fstsrv", extra=()):
+        words = [self.srv(tool), path] + list(extra)
+        return self.argv(" ".join(shlex.quote(w) for w in words), compress=True)
 
     # the old names, for fstsrv
     def fstsrv(self):

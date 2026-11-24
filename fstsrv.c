@@ -12,6 +12,9 @@
  * Built on demand against the GTKWave FST library shipped inside Verilator
  * (<VERILATOR_ROOT>/include/gtkwave), like fst2vcd_mini.c.
  *
+ * fstsrv <dump.fst> [--scope A.B.C]...   --scope lists only the variables
+ * below that scope (or that one variable), for a dump with too many to list.
+ *
  * Protocol (text lines). After start:
  *     wavesrv 1
  *     timescale <exponent>              e.g. -12 for 1ps
@@ -182,12 +185,36 @@ static void run_query(fstHandle *hl, int nh)
     printf(".\n");
 }
 
+/* --scope A.B.C: list only the variables below that scope, or that one
+ * variable; several may be given */
+#define MAX_SCOPES 64
+static const char *want_scope[MAX_SCOPES];
+static int n_want;
+
+static int in_scope(const char *path, int match_depth, const char *leaf)
+{
+    if (!n_want || match_depth >= 0)
+        return 1;
+    size_t pl = strlen(path);
+    for (int i = 0; i < n_want; i++) {
+        const char *w = want_scope[i];
+        if (pl == 0) {
+            if (!strcmp(w, leaf))
+                return 1;
+        } else if (!strncmp(w, path, pl) && w[pl] == '.' && !strcmp(w + pl + 1, leaf)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static void hierarchy(void)
 {
     struct fstHier *hier;
     char path[MAX_LINE];
     size_t depth_len[1024];
     int depth = 0;
+    int match_depth = -1; /* depth of the scope --scope named, -1 outside */
     path[0] = 0;
     fstReaderIterateHierRewind(ctx);
     while ((hier = fstReaderIterateHier(ctx))) {
@@ -200,6 +227,12 @@ static void hierarchy(void)
             if (len)
                 strncat(path, ".", sizeof(path) - strlen(path) - 1);
             strncat(path, hier->u.scope.name, sizeof(path) - strlen(path) - 1);
+            if (n_want && match_depth < 0)
+                for (int i = 0; i < n_want; i++)
+                    if (!strcmp(want_scope[i], path)) {
+                        match_depth = depth;
+                        break;
+                    }
             break;
         }
         case FST_HT_UPSCOPE:
@@ -207,6 +240,8 @@ static void hierarchy(void)
                 depth--;
                 if (depth < 1024)
                     path[depth_len[depth]] = 0;
+                if (match_depth > depth)
+                    match_depth = -1;
             }
             break;
         case FST_HT_VAR: {
@@ -215,14 +250,16 @@ static void hierarchy(void)
                 typ == FST_VT_SV_SHORTREAL || typ == FST_VT_GEN_STRING)
                 break;
             fstHandle h = hier->u.var.handle;
-            if (h <= max_handle)
-                width_of[h] = hier->u.var.length;
             /* the name may carry a packed range: "data [7:0]" */
             char name[4096];
             snprintf(name, sizeof(name), "%s", hier->u.var.name);
             char *sp = strchr(name, ' ');
             if (sp)
                 *sp = 0;
+            if (!in_scope(path, match_depth, name))
+                break;
+            if (h <= max_handle)
+                width_of[h] = hier->u.var.length;
             printf("var %u %u %s%s%s\n", h, hier->u.var.length, path, path[0] ? "." : "", name);
             break;
         }
@@ -234,8 +271,15 @@ static void hierarchy(void)
 
 int main(int argc, char **argv)
 {
-    if (argc < 2) {
-        fprintf(stderr, "usage: fstsrv <dump.fst>\n");
+    int bad = argc < 2;
+    for (int i = 2; i < argc && !bad; i++) {
+        if (!strcmp(argv[i], "--scope") && i + 1 < argc && n_want < MAX_SCOPES)
+            want_scope[n_want++] = argv[++i];
+        else
+            bad = 1;
+    }
+    if (bad) {
+        fprintf(stderr, "usage: fstsrv <dump.fst> [--scope A.B.C]...\n");
         return 2;
     }
     ctx = fstReaderOpen(argv[1]);
