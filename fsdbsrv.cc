@@ -326,6 +326,60 @@ static void pop_scope(void)
     }
 }
 
+/* -- the declared type and port direction, for the "vk" line after a var -- */
+
+static const char *var_type_name(int t)
+{
+    switch (t) {
+    case FSDB_VT_VCD_EVENT: return "event";
+    case FSDB_VT_VCD_INTEGER: return "integer";
+    case FSDB_VT_VCD_PARAMETER: return "parameter";
+    case FSDB_VT_VCD_REG: return "reg";
+    case FSDB_VT_VCD_SUPPLY0: return "supply0";
+    case FSDB_VT_VCD_SUPPLY1: return "supply1";
+    case FSDB_VT_VCD_TIME: return "time";
+    case FSDB_VT_VCD_TRI: return "tri";
+    case FSDB_VT_VCD_TRIAND: return "triand";
+    case FSDB_VT_VCD_TRIOR: return "trior";
+    case FSDB_VT_VCD_TRIREG: return "trireg";
+    case FSDB_VT_VCD_TRI0: return "tri0";
+    case FSDB_VT_VCD_TRI1: return "tri1";
+    case FSDB_VT_VCD_WAND: return "wand";
+    case FSDB_VT_VCD_WIRE: return "wire";
+    case FSDB_VT_VCD_WOR: return "wor";
+    case FSDB_VT_VCD_PORT: return "port";
+    case FSDB_VT_VCD_MEMORY: return "memory";
+    case FSDB_VT_VHDL_SIGNAL: return "signal";
+    case FSDB_VT_VHDL_VARIABLE: return "variable";
+    case FSDB_VT_VHDL_CONSTANT: return "constant";
+    default: return "-";
+    }
+}
+
+/* fsdbTreeCBDataVar carries the port direction in some FsdbReader versions
+ * (direction: FSDB_VD_IMPLICIT 0, INPUT 1, OUTPUT 2, INOUT 3, like FST's).
+ * Looked up only where the member exists, so this builds either way. */
+template <typename T>
+static auto var_direction(const T *v, int) -> decltype((int)v->direction)
+{
+    return (int)v->direction;
+}
+template <typename T>
+static int var_direction(const T *, long)
+{
+    return 0;
+}
+
+static const char *var_dir_name(int d)
+{
+    switch (d) {
+    case 1: return "in";
+    case 2: return "out";
+    case 3: return "inout";
+    default: return "-";
+    }
+}
+
 static void emit_var(fsdbTreeCBDataVar *var)
 {
     switch (var->type) {
@@ -361,6 +415,7 @@ static void emit_var(fsdbTreeCBDataVar *var)
     n_listed++;
     if (!idx) {
         fprintf(out, "var %u %u %s%s%s\n", (unsigned)id, w, path, path[0] ? "." : "", name);
+        fprintf(out, "vk %u %s %s\n", (unsigned)id, var_type_name(var->type), var_dir_name(var_direction(var, 0)));
         return;
     }
     if (idx_after_pop || idx_since >= CHECKPOINT)

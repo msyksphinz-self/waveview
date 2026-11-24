@@ -1192,7 +1192,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     return self._send(200, hub.public_state())
             if path == "/api/signals":
                 with hub.lock:
-                    return self._send(200, [[s.name, s.width] for s in hub.wave.signals])
+                    return self._send(200, [[s.name, s.width, s.kind] for s in hub.wave.signals])
             if path == "/api/snapshot":
                 table = query.get("table", ["0"])[0] == "1"
                 with hub.lock:
@@ -1631,7 +1631,7 @@ def print_snapshot(snap, radix="hex"):
 
 
 def _full_name(c, name):
-    names = [n for n, w in c.call("/api/signals")]
+    names = [row[0] for row in c.call("/api/signals")]
     if name in names:
         return name
     hits = [n for n in names if n.endswith("." + name)]
@@ -1852,6 +1852,8 @@ def run_selftest():
     check("next edge skips nothing", c.call("/api/next_edge", {"signal": "req", "t": 20, "dir": "next"})["time"] == 30)
     d = c.call("/api/wave", {"signals": ["tb_wave.dut.req"], "t0": 0, "t1": 195, "px": 1000})
     check("wave data", [t for t, _ in d["signals"]["tb_wave.dut.req"]["ch"]] == [20, 30, 70, 90] and len(d["edges"]) == 20)
+    check("signal list carries the declared kind", any(row[0] == "tb_wave.dut.req" and row[2] == "wire"
+                                                       for row in c.call("/api/signals")))
     d = c.call("/api/wave", {"signals": ["tb_wave.dut.data"], "t0": 0, "t1": 195, "px": 16})
     check("dense merge", len(d["signals"]["tb_wave.dut.data"]["dense"]) > 0)
     t = c.call("/api/tiles", {"L": 0, "want": {"tb_wave.dut.req": [0]}})["tiles"]["tb_wave.dut.req"]["0"]

@@ -63,6 +63,11 @@ input:focus, textarea:focus { border-color: var(--accent); }
 .sig { padding: 1px 8px; white-space: nowrap; cursor: default; user-select: none; display: flex; justify-content: space-between; gap: 8px; }
 .sig.on { background: var(--sel); }
 .sig .w { color: var(--dim); }
+.sig .r { display: flex; gap: 8px; align-items: baseline; }
+.sig .k { color: var(--dim); font-size: 11px; }
+.sig .k.in { color: #2f8f4e; }
+.sig .k.out { color: #c06a1a; }
+.sig .k.inout { color: #8a5cc0; }
 .more { padding: 3px 8px; color: var(--dim); }
 #split { width: 5px; cursor: col-resize; background: var(--line); }
 

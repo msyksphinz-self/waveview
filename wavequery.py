@@ -76,7 +76,7 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import wave2img as w2i  # noqa: E402
 
-CACHE_VERSION = 1
+CACHE_VERSION = 2  # 2: signals carry their type and direction
 DEFAULT_MAX_ROWS = 200
 
 
@@ -412,7 +412,7 @@ def _to_cache(dump):
         "timescale": dump.timescale,
         "start": dump.start_time,
         "end": dump.end_time,
-        "signals": [(s.name, s.width, s.code) for s in dump.signals],
+        "signals": [(s.name, s.width, s.code, s.vtype, s.direction) for s in dump.signals],
         "times": dump.times,
         "values": dump.values,
     }
@@ -423,7 +423,7 @@ def _from_cache(data):
     dump.timescale = data["timescale"]
     dump.start_time = data["start"]
     dump.end_time = data["end"]
-    dump.signals = [w2i.Signal(n, w, c, i) for i, (n, w, c) in enumerate(data["signals"])]
+    dump.signals = [w2i.Signal(s[0], s[1], s[2], i, *s[3:5]) for i, s in enumerate(data["signals"])]
     dump.times = data["times"]
     dump.values = data["values"]
     return Wave(dump)
@@ -1233,6 +1233,8 @@ def run_selftest():
             check("fst: " + label, [fst if x == path else x for x in argv], test, record=False)
         w = load(fst)
         check("fst: read lazily", ["info", fst], lambda t: getattr(w, "lazy", False), record=False)
+        check("fst: signals carry their declared type", ["info", fst],
+              lambda t: all(s.vtype == "wire" for s in w.signals), record=False)
         w.close()
         for label, argv, test in scoped:
             check("fst: " + label, [fst if x == path else x for x in argv], test, record=False)

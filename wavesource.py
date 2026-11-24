@@ -137,6 +137,11 @@ class LazyFst(wq.Wave):
                 h, w = int(h), int(w)
                 width_of[h] = w
                 dump.signals.append(w2i.Signal(name, w, h, len(dump.signals)))
+            elif kind == "vk":  # the declared type and port direction of the var just listed
+                h, vtype, direction = rest.split(" ", 2)
+                if dump.signals and dump.signals[-1].code == int(h):
+                    dump.signals[-1].vtype = vtype if vtype != "-" else ""
+                    dump.signals[-1].direction = direction.strip() if direction.strip() != "-" else ""
             elif kind == "index":  # the names went to the plan's file
                 built = {"signals": int(rest.split()[0]), "scope_count": int(rest.split()[1]), "scopes": {},
                          "clocks": []}

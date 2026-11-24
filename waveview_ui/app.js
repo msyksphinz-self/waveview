@@ -474,15 +474,15 @@ function toast(msg) {
 let TREE = null;
 function buildTree() {
   TREE = { name: '', path: '', kids: new Map(), sigs: [] };
-  for (const [name, w] of S.all) {
-    const parts = name.split('.');
+  for (const entry of S.all) {  // [name, width, kind]
+    const parts = entry[0].split('.');
     let node = TREE;
     for (let i = 0; i < parts.length - 1; i++) {
       let k = node.kids.get(parts[i]);
       if (!k) { k = { name: parts[i], path: parts.slice(0, i + 1).join('.'), kids: new Map(), sigs: [], open: false }; node.kids.set(parts[i], k); }
       node = k;
     }
-    node.sigs.push([name, w]);
+    node.sigs.push(entry);
   }
   // open the first levels that have a single child, as GTKWave users expect
   let n = TREE;
@@ -558,14 +558,20 @@ function renderSigList() {
   }
   const LIMIT = 2000;
   const prefix = f ? (S.scope ? S.scope + '.' : '') : (S.scope ? S.scope + '.' : '');
-  listed.slice(0, LIMIT).forEach(([n, w], i) => {
+  listed.slice(0, LIMIT).forEach(([n, w, kind], i) => {
     const d = document.createElement('div');
     d.className = 'sig' + (S.pick.has(n) ? ' on' : '');
     d.draggable = true;
     const a = document.createElement('span'); a.textContent = n.startsWith(prefix) ? n.slice(prefix.length) : n;
+    // the declared type and direction, as the dump says: "out logic", "wire"
+    const k = document.createElement('span'); k.className = 'k';
+    const dir = (kind || '').split(' ')[0];
+    if (dir === 'in' || dir === 'out' || dir === 'inout') k.classList.add(dir);
+    k.textContent = kind || '';
     const b = document.createElement('span'); b.className = 'w'; b.textContent = w > 1 ? `[${w - 1}:0]` : '';
-    d.append(a, b);
-    d.title = n;
+    const right = document.createElement('span'); right.className = 'r'; right.append(k, b);
+    d.append(a, right);
+    d.title = n + (kind ? '  (' + kind + ')' : '');
     d.onclick = (e) => {
       if (e.shiftKey && S.pickAnchor != null) {
         const [lo, hi] = [Math.min(S.pickAnchor, i), Math.max(S.pickAnchor, i)];

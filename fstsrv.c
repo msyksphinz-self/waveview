@@ -20,6 +20,8 @@
  *     timescale <exponent>              e.g. -12 for 1ps
  *     range <start> <end>
  *     var <handle> <width> <full.dotted.name>      once per variable
+ *     vk <handle> <type> <dir>                      its declared type (wire, reg, logic...)
+ *                                                   and port direction (in, out, inout), - if unknown
  *     end
  * Commands and answers:
  *     read <t0> <t1> <h> [<h>...]
@@ -208,6 +210,49 @@ static int in_scope(const char *path, int match_depth, const char *leaf)
     return 0;
 }
 
+/* the declared type and port direction, for the "vk" line after each var */
+static const char *var_type_name(unsigned char typ)
+{
+    switch (typ) {
+    case FST_VT_VCD_EVENT: return "event";
+    case FST_VT_VCD_INTEGER: return "integer";
+    case FST_VT_VCD_PARAMETER: return "parameter";
+    case FST_VT_VCD_REG: return "reg";
+    case FST_VT_VCD_SUPPLY0: return "supply0";
+    case FST_VT_VCD_SUPPLY1: return "supply1";
+    case FST_VT_VCD_TIME: return "time";
+    case FST_VT_VCD_TRI: return "tri";
+    case FST_VT_VCD_TRIAND: return "triand";
+    case FST_VT_VCD_TRIOR: return "trior";
+    case FST_VT_VCD_TRIREG: return "trireg";
+    case FST_VT_VCD_TRI0: return "tri0";
+    case FST_VT_VCD_TRI1: return "tri1";
+    case FST_VT_VCD_WAND: return "wand";
+    case FST_VT_VCD_WIRE: return "wire";
+    case FST_VT_VCD_WOR: return "wor";
+    case FST_VT_VCD_PORT: return "port";
+    case FST_VT_SV_BIT: return "bit";
+    case FST_VT_SV_LOGIC: return "logic";
+    case FST_VT_SV_INT: return "int";
+    case FST_VT_SV_SHORTINT: return "shortint";
+    case FST_VT_SV_LONGINT: return "longint";
+    case FST_VT_SV_BYTE: return "byte";
+    case FST_VT_SV_ENUM: return "enum";
+    default: return "-";
+    }
+}
+
+static const char *var_dir_name(unsigned char dir)
+{
+    switch (dir) {
+    case FST_VD_INPUT: return "in";
+    case FST_VD_OUTPUT: return "out";
+    case FST_VD_INOUT: return "inout";
+    case FST_VD_BUFFER: return "buffer";
+    default: return "-";
+    }
+}
+
 static void hierarchy(void)
 {
     struct fstHier *hier;
@@ -261,6 +306,7 @@ static void hierarchy(void)
             if (h <= max_handle)
                 width_of[h] = hier->u.var.length;
             printf("var %u %u %s%s%s\n", h, hier->u.var.length, path, path[0] ? "." : "", name);
+            printf("vk %u %s %s\n", h, var_type_name(typ), var_dir_name(hier->u.var.direction));
             break;
         }
         default:

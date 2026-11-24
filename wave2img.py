@@ -94,13 +94,23 @@ HATCH_Z = "...."
 
 
 class Signal:
-    """One $var entry: a hierarchical name, a width and a dump identifier."""
+    """One $var entry: a hierarchical name, a width and a dump identifier.
+    vtype is the declared type as the dump names it (wire, reg, logic,
+    integer...) and direction a port direction (in, out, inout), both ""
+    when the dump does not say."""
 
-    def __init__(self, name, width, code, index):
+    def __init__(self, name, width, code, index, vtype="", direction=""):
         self.name = name
         self.width = width
         self.code = code
         self.index = index  # declaration order in the dump
+        self.vtype = vtype
+        self.direction = direction
+
+    @property
+    def kind(self):
+        """'out logic', 'wire', '' : what a signal list shows next to the name."""
+        return " ".join(k for k in (self.direction, self.vtype) if k)
 
     def __repr__(self):
         return "Signal(%s, %d)" % (self.name, self.width)
@@ -181,7 +191,7 @@ def parse_vcd(path):
                     # the name: data[7:0]. Keep [3] (an element), drop [7:0]
                     name = re.sub(r"\[\d+:\d+\]$", "", fields[3])
                     full = ".".join(scope + [name])
-                    dump.signals.append(Signal(full, width, code, len(dump.signals)))
+                    dump.signals.append(Signal(full, width, code, len(dump.signals), vtype=fields[0]))
                     code_width[code] = width
                 i = j
             elif tok in ("$date", "$version", "$comment"):
