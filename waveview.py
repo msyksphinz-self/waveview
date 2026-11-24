@@ -1155,7 +1155,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if path == "/api/session":
                 return self._send(200, {"dump": hub.dump_path if hub else None})
             if path == "/api/hosts":
-                return self._send(200, {"hosts": opener.ssh_hosts()})
+                return self._send(200, {"hosts": opener.ssh_hosts(), "local": opener.local_name()})
             if method == "POST" and path == "/api/ls":
                 return self._list_dir(self._body())
             if method == "POST" and path == "/api/open":
@@ -1419,13 +1419,17 @@ def cmd_serve(args):
 
 def run_window(link, port, on_close):
     """The viewer in its own window; closing the window ends the server. If
-    there is no such browser, use the default one and keep the console."""
+    there is no such browser, use the default one and keep the console; the
+    macOS app has no console, so a dialog stands in for the window there."""
     import webbrowser
 
     base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
     proc = opener.open_window(link, os.path.join(base, "waveview", "window", str(port)))
     if proc is None:
         webbrowser.open(link)
+        if opener.MAC and getattr(sys, "frozen", False) and (sys.stdin is None or not sys.stdin.isatty()):
+            opener.wait_for_quit(link)
+            on_close()
         return
     opened = time.time()
     opener.hide_console_if_ours()
@@ -1962,9 +1966,10 @@ def run_selftest():
             os.environ.pop("FSDB2VCD", None)
         else:
             os.environ["FSDB2VCD"] = old
-    # a dump and RTL on "another machine": ssh replaced by a local stand-in
+    # a dump and RTL on "another machine": ssh replaced by a local stand-in,
+    # which builds fstsrv from source like a real server would
     conv = w2i.build_fst_converter(verbose=False)
-    if conv is None or os.name == "nt":
+    if conv is None or os.name == "nt" or w2i.fst_include() is None:
         print("skip remote checks: needs sh and the FST tools")
     else:
         import subprocess
@@ -2069,7 +2074,7 @@ def build_parser():
                                        "shown relative to (default: the first entry's directory)")
     s.add_argument("--open", action="store_true", help="open a local browser")
     s.add_argument("--window", action="store_true",
-                   help="open an application window (Edge or Chrome); closing it stops the server")
+                   help="open an application window (Chrome or Edge); closing it stops the server")
 
     client = argparse.ArgumentParser(add_help=False)
     client.add_argument("--dump", help="which running viewer (default: the most recent)")
@@ -2144,30 +2149,31 @@ def build_parser():
 
 
 def desktop_argv(argv):
-    """The packaged exe started from Explorer: no arguments (double click) or
-    one dump (dropped on the exe, or "Open with"). Anything else is the normal
-    command line. The source view stays off until asked for in the Open
-    dialog: the working directory of a double click is not a project."""
+    """The packaged exe started from Explorer or the Finder: no arguments
+    (double click) or one dump (dropped on the exe, or "Open with"). Anything
+    else is the normal command line. The source view stays off until asked
+    for in the Open dialog: the working directory of a double click is not a
+    project. The Finder may add a process serial number (-psn_...): not ours."""
+    argv = [a for a in argv if not a.startswith("-psn_")]
     if len(argv) > 1 or (argv and not argv[0].lower().endswith((".fst", ".vcd", ".fsdb"))):
-        return argv
+        return None
     return ["serve", "--no-rtl", "--window"] + argv
 
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else list(argv)
-    if not getattr(sys, "frozen", False):
+    launched = desktop_argv(argv) if getattr(sys, "frozen", False) else None
+    if launched is None:
         return run_command(argv)
-    launched = desktop_argv(argv)
-    if launched is argv:
-        return run_command(argv)
-    # started from Explorer: keep the console open so an error can be read
+    # started by a double click: an error must stay readable
     try:
         rc = run_command(launched)
     except Exception as exc:
-        print("error: %s" % exc, file=sys.stderr)
         rc = 1
-    if rc:
-        input("Press Enter to close...")
+        opener.report_error(str(exc))
+    else:
+        if rc:
+            opener.report_error("waveview exited with status %d" % rc)
     return rc
 
 

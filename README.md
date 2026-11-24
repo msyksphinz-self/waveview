@@ -31,7 +31,8 @@ AI agent use together, built for remote development.
 
 Python 3 standard library only. FST support builds a small C helper on
 demand against the FST library shipped with Verilator (`verilator` on PATH or
-`VERILATOR_ROOT`).
+`VERILATOR_ROOT`; up to Verilator 5.040, later versions ship only an FST
+writer). The standalone Windows and macOS builds carry the helper.
 
 ## Quick start
 
@@ -73,6 +74,27 @@ to build its FST reader.
 To build it, run `./build_windows.sh` from WSL with a Windows Python on `PATH`
 and Verilator installed. The result is `dist/waveview.exe`.
 
+### Standalone macOS app
+
+`waveview.app` is the same program for a Mac: no Python, Verilator or C
+compiler needed. Double-click it and a window opens (Chrome, Edge, Chromium or
+Brave in app mode; without one of those the default browser opens and a small
+dialog quits the viewer). It has no Dock icon of its own: the window is the
+application, closing it ends the program. Drop a `.fst` / `.vcd` / `.fsdb` on
+the icon or use "Open With" to start on that dump. Next to it, `dist/waveview`
+is the same binary as a plain command: `./waveview serve w.fst --open`, and
+all the `add / goto / look` commands.
+
+The app is not notarized: the first time, right-click it and choose Open, or
+run `xattr -dr com.apple.quarantine waveview.app` after copying it over. It is
+built for the CPU it was built on (Apple silicon or Intel).
+
+To build it, run `./build_macos.sh` on a Mac with the Xcode command line tools
+(`xcode-select --install`) and `python3`. The FST library comes from Verilator
+if an installed one still ships it (up to 5.040), otherwise the script fetches
+the Verilator 5.040 sources for it. The result is `dist/waveview.app` and
+`dist/waveview`.
+
 ## Files
 
 | File | What |
@@ -86,6 +108,7 @@ and Verilator installed. The result is `dist/waveview.exe`.
 | `rtlindex.py` | SystemVerilog index (heuristic, Verilator `--xml-only`, or design JSON) |
 | `wave2img.py`, `fst2vcd_mini.c` | VCD parser; draws a timing diagram to SVG/PNG (needs matplotlib) |
 | `build_windows.sh` | builds the standalone `dist/waveview.exe` |
+| `build_macos.sh` | builds the standalone `dist/waveview.app` (and `dist/waveview`) |
 | `docs/guide_ja.md` | user guide (Japanese) |
 | `docs/waveview_design_format.md` | design JSON format, for exporters (e.g. from a Verdi KDB) |
 | `.claude/skills/wave-debug/` | Claude Code skill: how an agent debugs with these tools |

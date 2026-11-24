@@ -300,6 +300,16 @@ def verilator_root():
     return None
 
 
+def fst_include():
+    """The directory of Verilator's copy of the GTKWave FST library (fstapi.c),
+    or None: Verilator 5.041 and later ship a writer only."""
+    root = verilator_root()
+    if root is None:
+        return None
+    include = os.path.join(root, "include", "gtkwave")
+    return include if os.path.isfile(os.path.join(include, "fstapi.c")) else None
+
+
 def cache_dir():
     base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
     path = os.path.join(base, "waveview", "build")
@@ -315,10 +325,13 @@ def build_fst_converter(verbose=True):
 def build_fst_tool(name, verbose=True):
     """Compile tools/<name>.c against Verilator's copy of the FST library.
     Returns the binary path or None. The binary is cached and only rebuilt
-    when the C source is newer. A packaged waveview.exe carries its own."""
+    when the C source is newer. A packaged waveview (exe or app) carries its
+    own."""
     bundle = getattr(sys, "_MEIPASS", None)
-    if bundle and os.path.isfile(os.path.join(bundle, name + ".exe")):
-        return os.path.join(bundle, name + ".exe")
+    if bundle:
+        for packed in (name + ".exe", name):
+            if os.path.isfile(os.path.join(bundle, packed)):
+                return os.path.join(bundle, packed)
     source = os.path.join(os.path.dirname(os.path.abspath(__file__)), name + ".c")
     if not os.path.isfile(source):
         return None
@@ -326,19 +339,13 @@ def build_fst_tool(name, verbose=True):
     if os.path.isfile(binary) and os.path.getmtime(binary) >= os.path.getmtime(source):
         return binary
 
-    root = verilator_root()
-    if root is None:
+    include = fst_include()
+    if include is None:
         if verbose:
-            sys.stderr.write(
-                "warning: VERILATOR_ROOT not found, cannot build the FST reader\n"
-            )
+            sys.stderr.write("warning: no Verilator with the FST library (include/gtkwave/fstapi.c, "
+                             "up to Verilator 5.040) found, cannot build the FST reader\n")
         return None
-    include = os.path.join(root, "include", "gtkwave")
     fstapi = os.path.join(include, "fstapi.c")
-    if not os.path.isfile(fstapi):
-        if verbose:
-            sys.stderr.write("warning: %s not found\n" % fstapi)
-        return None
 
     compiler = os.environ.get("CC") or shutil.which("cc") or shutil.which("gcc")
     if compiler is None:

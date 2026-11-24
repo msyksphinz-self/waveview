@@ -201,6 +201,40 @@ tools\waveview.cmd serve build01:/work/sim/w.fst --rtl build01:/work/proj/rtl/fi
   `WAVEVIEW_REMOTE_FSTSRV` で指定する
 - リモートは FST のみ。VCD / FSDB はサーバで waveview を動かす従来の方法 (ssh -L) で見る
 
+## macOS (手元の Mac) から使う
+
+Mac でも同じ。`python3` は Xcode コマンドラインツールに入っているので、
+リポジトリをそのまま使える:
+
+```sh
+python3 waveview.py serve build01:/work/sim/w.fst --rtl build01:/work/proj/rtl/filelist.f --rtl-root /work/proj --window
+```
+
+- `--window` は Chrome / Edge / Chromium / Brave をアプリモードで開き、
+  ウィンドウを閉じるとサーバも終わる。どれも無ければ既定のブラウザで開く
+- 手元の FST を直接開くには `fstsrv` のビルドが要る。`brew install verilator`
+  で入る Verilator 5.041 以降は FST の読み取りライブラリを同梱しなくなった
+  ので、その場合は下のスタンドアロン版 (ヘルパー同梱) を使う。
+  リモートの FST はサーバ側でビルドするので手元には何も要らない
+
+### スタンドアロン版 `waveview.app`
+
+Python も Verilator も C コンパイラも要らない。ダブルクリックするとウィンドウが
+開くので、**Open…** で This Mac か `~/.ssh/config` のホストを選び、Connect
+してダンプを開く。`.fst` / `.vcd` / `.fsdb` をアイコンに落としても (または
+「このアプリケーションで開く」でも) 開ける。Dock にアイコンは出ず、ウィンドウを
+閉じるとプログラムも終わる。FSDB は Verdi の `fsdb2vcd` が別途要る。
+
+- 署名 (公証) はしていないので、初回は右クリック → 開く、または
+  `xattr -dr com.apple.quarantine waveview.app`
+- ウィンドウに端末はないので、ssh は鍵 (パスフレーズ付きなら ssh-agent) で
+  入れるようにし、ホスト鍵は一度端末から接続して受け入れておく
+- `dist/waveview` は同じものをコマンドとして使う形:
+  `./waveview serve w.fst --open`、`./waveview add '*commit*'` など
+- 作り方: Mac で `./build_macos.sh` (Xcode コマンドラインツールと python3 が
+  あればよい)。結果は `dist/waveview.app` と `dist/waveview`。ビルドした
+  Mac の CPU (Apple silicon / Intel) 向けになる
+
 ## 画面と操作 (GTKWave / Verdi nWave 準拠)
 
 左に階層ツリーと信号リスト (GTKWave の SST)、中央に信号名と値 (カーソル位置)、右に波形。

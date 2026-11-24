@@ -9,3 +9,13 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y verilator zlib1g-dev
       - name: Self tests
         run: ./run_tests.sh
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Self tests (FST checks run only if Verilator ships the FST library)
+        run: ./run_tests.sh
+      - name: Standalone app
+        run: ./build_macos.sh
+      - name: Self tests of the app
+        run: ./dist/waveview selftest
