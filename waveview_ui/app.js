@@ -754,7 +754,7 @@ function renderDiagram(d) {
     return orderOf(e.from) > orderOf(e.to);
   };
   for (const e of edges) {
-    if (!nodes.has(e.from) || !nodes.has(e.to) || e.from === e.to || isPlumbing(e) || RESPONSE.has(e.role) || skip(e)) continue;
+    if (!nodes.has(e.from) || !nodes.has(e.to) || e.from === e.to || isPlumbing(e) || e.undirected || RESPONSE.has(e.role) || skip(e)) continue;
     preds.get(e.to).push(e.from);
   }
   const state = new Map();
@@ -828,29 +828,54 @@ function renderDiagram(d) {
   for (const e of edges) { const pk = [e.from, e.to].sort().join('\u0001'); pairCount.set(pk, (pairCount.get(pk) || 0) + 1); }
   const pairRank = new Map();
   for (const e of [...edges].sort((a, b) => b.width - a.width)) { const pk = [e.from, e.to].sort().join('\u0001'); const r = pairRank.get(pk) || 0; e._rank = r; pairRank.set(pk, r + 1); }
+  // wires run orthogonally, like a schematic: out of the source, along a
+  // vertical lane in the gap between the columns, into the sink. Each wire
+  // in a gap gets its own lane so that they do not lie on each other
+  const lanes = new Map();  // gap key -> next lane
+  const laneOf = (key) => { const k = lanes.get(key) || 0; lanes.set(key, k + 1); return k; };
+  const stubSide = (n, side) => (side === 'in' ? n.x : n.x + n.w);
   for (const e of edges) {
     const a = nodes.get(e.from), b = nodes.get(e.to);
     if (!a || !b) continue;
     const fb = bundleOf(a, 'out', e.bundle) || a.out[0], tb = b.in.find((x) => e.nets.some((nt) => x.signals.includes(nt[2]))) || b.in[0];
-    const x1 = a.x + a.w, y1 = fb ? stubY(a, 'out', fb) : a.y + a.h / 2;
-    let x2 = b.x, y2 = tb ? stubY(b, 'in', tb) : b.y + b.h / 2;
-    const g = el('g', { class: 'edge' + (isPlumbing(e) ? ' plumbing' : '') });
-    const sw = isPlumbing(e) ? 1 : 1 + Math.min(5, Math.log2(1 + e.width) / 2);
-    let mx = (x1 + x2) / 2;
-    if (a.rank === b.rank) {
-      // peers in one column: out to the right and back in on the right side
-      x2 = b.x + b.w; mx = x1 + 70;
-      el('path', { d: `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`, stroke: protoColor(e.protocol), 'stroke-width': sw.toFixed(1) }, g);
-    } else
-    el('path', { d: `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`, stroke: protoColor(e.protocol), 'stroke-width': sw.toFixed(1) }, g);
-    if (!isPlumbing(e) && e._rank < 3) {
+    const undirected = !!e.undirected;
+    // an undirected net leaves the right side and enters the left side when
+    // the boxes are in order, else it loops like a peer link
+    const x1 = stubSide(a, 'out'), y1 = fb ? stubY(a, 'out', fb) : (undirected && a.in.length && !a.out.length ? stubY(a, 'in', a.in.find((x) => e.nets.some((nt) => x.signals.includes(nt[0]))) || a.in[0]) : a.y + a.h / 2);
+    let x2 = stubSide(b, 'in'), y2 = tb ? stubY(b, 'in', tb) : b.y + b.h / 2;
+    const g = el('g', { class: 'edge' + (isPlumbing(e) ? ' plumbing' : '') + (undirected ? ' undirected' : '') });
+    const sw = isPlumbing(e) || undirected ? 1 : 1 + Math.min(5, Math.log2(1 + e.width) / 2);
+    const color = undirected ? '#8b929c' : protoColor(e.protocol);
+    let d, ax, ay, dir;  // the wire, and where its arrowhead points
+    if (a.rank === b.rank || b.rank < a.rank) {
+      // peers in one column (or a wire back to an earlier column): out to the
+      // right, down or up along a lane, back in on the right side of the sink
+      x2 = b.x + b.w;
+      const lane = laneOf('loop' + a.rank);
+      const mx = Math.max(x1, x2) + 24 + lane * 9;
+      d = `M${x1},${y1} H${mx} V${y2} H${x2}`;
+      ax = x2; ay = y2; dir = -1;
+    } else {
+      const lane = laneOf('gap' + a.rank);
+      const gap = b.x - x1;
+      const mx = x1 + 22 + ((lane * 9) % Math.max(10, gap - 44));
+      d = `M${x1},${y1} H${mx} V${y2} H${x2}`;
+      ax = x2; ay = y2; dir = 1;
+    }
+    el('path', { d, stroke: color, 'stroke-width': sw.toFixed(1), fill: 'none' }, g);
+    if (!undirected) el('path', { d: `M${ax},${ay} l${-6 * dir},-4 v8 z`, fill: color, stroke: 'none', class: 'arrow' }, g);
+    if (!isPlumbing(e) && !undirected && e._rank < 3) {
+      // the label sits on the first horizontal run, a line lower for each
+      // further wire of the same pair of boxes
       const pk = [a.name, b.name].sort().join('\u0001');
       const k = pairSeen.get(pk) || 0;
       pairSeen.set(pk, k + 1);
-      const t = 0.5 + (k % 3 - 1) * 0.2;  // 0.3, 0.5, 0.7 along the edge, and a line lower each time
-      const lx = x1 + (x2 - x1) * t, ly = y1 + (y2 - y1) * t - 4 + k * 13;
       const label = (e.label ? `“${e.label}” ` : '') + (e.protocol || (e.label ? '' : e.bundle)) + (e.role ? ' ' + e.role : '') + ` ${e.width}b`;
-      text(g, lx, ly, label.replace(/\s+/g, ' ').trim(), '', 'middle');
+      text(g, x1 + 6, y1 - 3 + k * 12, label.replace(/\s+/g, ' ').trim(), '', 'start');
+    } else if (undirected) {
+      const label = `${e.bundle} ${e.width}b`;
+      const tl = text(g, x1 + 6, y1 - 3, label, 'undirected', 'start');
+      tl.setAttribute('opacity', '.8');
     }
     g.addEventListener('click', () => {
       const pre = d.scope ? d.scope + '.' : '';

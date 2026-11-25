@@ -1045,24 +1045,30 @@ class Hub:
                 if "[" in net and base in whole:
                     ends = ends + whole[base]
                 drivers = [e for e in ends if e[2] == "output"]
-                sinks = [e for e in ends if e[2] == "input"]
+                # with a known driver, an end of unknown direction (inout, a
+                # module the index lacks) is taken as a reader
+                sinks = [e for e in ends if e[2] != "output"]
+                undirected = False
                 if not drivers:
-                    # inout or unknown direction: a sibling-to-sibling line
-                    # would be a guess, so only the scope's port (if the net
-                    # is one) is tied to the instances on it
+                    # inout or unknown direction (a module the index lacks,
+                    # an inout): nobody is known to drive it. The net is still
+                    # drawn, as an undirected line from one of the instances
+                    # on it to each other (the scope's port first when it is
+                    # one); it does not place the boxes
                     port_end = [e for e in ends if e[0] == ""]
-                    if not port_end:
-                        continue
-                    drivers, sinks = port_end[:1], [e for e in ends if e[0] != ""]
+                    first = port_end[:1] or ends[:1]
+                    drivers, sinks = first, [e for e in ends if e is not first[0]]
+                    undirected = True
                 for di, dp, _ in drivers:
                     for si, sp, _ in sinks:
                         if di == si:
                             continue
                         bd = bundle_of.get((di, dp))
-                        key = (di, si, bd["name"] if bd else dp)
+                        key = (di, si, bd["name"] if bd else dp, undirected)
                         e = edges.setdefault(key, {"from": di, "to": si, "bundle": bd["name"] if bd else dp,
                                                    "protocol": bd["protocol"] if bd else None,
-                                                   "role": bd["role"] if bd else None, "width": 0, "nets": []})
+                                                   "role": bd["role"] if bd else None, "width": 0, "nets": [],
+                                                   "undirected": undirected})
                         e["width"] += widths.get(net, widths.get(di + "." + dp, 1))
                         e["nets"].append([dp, net, sp])
         # which way is the request: names like cmd / valid / addr go forward,
@@ -2069,8 +2075,10 @@ def print_diagram(d):
             tag += " " + e["role"]
         if e.get("label"):
             tag = '"%s"' % e["label"] + (", " + tag if e["protocol"] else "")
-        print("edge    %s -> %s  %s [%s, %d bits, %d nets]" % (e["from"] or "(ports)", e["to"] or "(ports)",
-                                                            e["bundle"], tag, e["width"], len(e["nets"])))
+        arrow = "--" if e.get("undirected") else "->"
+        print("edge    %s %s %s  %s [%s, %d bits, %d nets%s]" % (e["from"] or "(ports)", arrow, e["to"] or "(ports)",
+                                                              e["bundle"], tag, e["width"], len(e["nets"]),
+                                                              ", no known driver" if e.get("undirected") else ""))
     if d.get("unlabelled"):
         print("unnamed %s" % ", ".join(d["unlabelled"]))
         print("        (name one: waveview.py label %s <box/bundle> \"what it is\"; its signals: diagram --json)"

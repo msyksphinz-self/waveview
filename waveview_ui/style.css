@@ -210,6 +210,11 @@ table.keys td { padding: 3px 14px 3px 0; }
 #dg-svg .edge path { fill: none; cursor: pointer; opacity: .85; }
 #dg-svg .edge:hover path { opacity: 1; stroke-width: 6 !important; }
 #dg-svg .edge.plumbing path { stroke-dasharray: 3 4; opacity: .45; }
+#dg-svg .edge path { stroke-linejoin: miter; stroke-linecap: butt; }
+#dg-svg .edge .arrow { opacity: 1; }
+#dg-svg .edge:hover .arrow { stroke-width: 0 !important; }
+#dg-svg .edge.undirected path { stroke-dasharray: 5 3; opacity: .7; }
+#dg-svg .edge text.undirected { font-style: italic; }
 #dg-svg .edge text { font-size: 10px; fill: var(--fg); paint-order: stroke; stroke: var(--wbg); stroke-width: 3px; pointer-events: none; }
 .op-item.db { color: var(--fg); font-weight: 600; }
 #op-msg { min-height: 1.3em; font-size: 12px; overflow-wrap: anywhere; max-height: 5em; overflow-y: auto; }
