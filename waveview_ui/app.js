@@ -2442,7 +2442,7 @@ async function opOpen() {
   OP.busy = true;
   OP.seq++;  // a listing still on its way must not replace this message
   $('op-open').disabled = true;
-  opMsg(`Opening ${OP.file.name}…` + (OP.host ? ' The first time on a server also builds its reader.' : ''));
+  opMsg(`Opening ${OP.file.name}…` + (OP.host ? ' The first time on a server also builds its reader.' : '') + (OP.file.size > 100e6 ? ' A dump with millions of signals gets a name index the first time (a minute or two), seconds after.' : ''));
   try {
     await api('/api/open', { host: OP.host, path: OP.file.path, rtl: $('op-rtl').value, scope: $('op-scope').value });
     opRemember('rtl:' + OP.host, $('op-rtl').value);
@@ -2455,7 +2455,10 @@ async function opOpen() {
     if (d.too_many) {
       // too many signals to list: the first levels of the hierarchy, largest first, to pick from
       $('op-scopes').replaceChildren(...d.scopes.map(([s, n]) => { const o = document.createElement('option'); o.value = s; o.label = `${n.toLocaleString()} signals`; return o; }));
-      opMsg(`${OP.file.name} has ${d.signals.toLocaleString()} signals: too many to list at once. Enter a scope (the field offers the largest first levels) and press Open again.`, true);
+      const sc = $('op-scope').value.trim();
+      opMsg(sc
+        ? `${sc} still holds ${d.signals.toLocaleString()} signals: too many to list. Pick a scope below it (the field offers the largest), or clear Scope and open the whole dump through its name index (the first time builds the index: a minute or two).`
+        : `${OP.file.name} has ${d.signals.toLocaleString()} signals: too many to list at once. Enter a scope (the field offers the largest first levels) and press Open again.`, true);
       $('op-scope').focus();
       return;
     }
