@@ -164,9 +164,10 @@ struct bucket {
     char *key;
     uint64_t n;
 };
-static struct bucket *buckets; /* variables per scope of the first three levels */
+static struct bucket *buckets; /* variables per scope of the first SUMMARY_DEPTH levels */
 static size_t n_buckets, cap_buckets;
-static size_t bucket_at[4];
+#define SUMMARY_DEPTH 6 /* scopes this deep get a count of their own in the summary */
+static size_t bucket_at[SUMMARY_DEPTH + 1];
 struct clock_cand {
     fsdbVarIdcode id;
     uint64_t ord;
@@ -307,7 +308,7 @@ static void push_scope(const char *name, char kind)
                 match_depth = depth;
                 break;
             }
-    if (idx && depth <= 3)
+    if (idx && depth <= SUMMARY_DEPTH)
         bucket_at[depth] = new_bucket(path);
 }
 
@@ -422,7 +423,7 @@ static void emit_var(fsdbTreeCBDataVar *var)
     if (idx_after_pop || idx_since >= CHECKPOINT)
         idx_checkpoint();
     idx_since += fprintf(idx, "%u %u %s\n", (unsigned)id, w, name);
-    buckets[bucket_at[depth < 3 ? depth : 3]].n++;
+    buckets[bucket_at[depth < SUMMARY_DEPTH ? depth : SUMMARY_DEPTH]].n++;
     if (w == 1 && has_clock_name(name))
         note_clock(id, name);
 }
