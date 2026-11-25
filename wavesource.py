@@ -69,6 +69,26 @@ class ArithEdges:
         return (self.first + k * self.period for k in range(self.count))
 
 
+class TooManySignals(wq.QueryError):
+    """A dump with more signals than can be listed at once; `scopes` are
+    the first levels of its hierarchy with their signal counts."""
+
+    def __init__(self, path, built):
+        self.path = path
+        self.signals = built["signals"]
+        self.scope_count = built["scope_count"]
+        self.scopes = sorted(built["scopes"].items(), key=lambda kv: -kv[1])
+        top = ", ".join("%s (%s)" % (s, _count(n)) for s, n in self.scopes[:8])
+        super().__init__("%s has %s signals in %s scopes: too many to list at once. Open a part of it with "
+                         "--scope A.B.C (the Scope field of Open… in the viewer; WAVE_INDEX_MIN raises the limit). "
+                         "Largest first levels: %s" % (os.path.basename(path.rstrip("/")), _count(self.signals),
+                                                       _count(self.scope_count), top or "none"))
+
+
+def _count(n):
+    return "{:,}".format(n)
+
+
 class LazyFst(wq.Wave):
     """A dump read in place through a wave server process: fstsrv.c for FST,
     fsdbsrv.cc for FSDB (the same protocol)."""
@@ -136,8 +156,13 @@ class LazyFst(wq.Wave):
                 h, w, name = rest.split(" ", 2)
                 h, w = int(h), int(w)
                 width_of[h] = w
-                dump.signals.append(w2i.Signal(name, w, h, len(dump.signals)))
-            elif kind == "vk":  # the declared type and port direction of the var just listed
+                # after a tab: the declared type and port direction ("-" when unknown)
+                name, _, tk = name.partition("\t")
+                vtype, _, direction = tk.partition(" ")
+                dump.signals.append(w2i.Signal(name, w, h, len(dump.signals),
+                                               vtype if vtype and vtype != "-" else "",
+                                               direction if direction and direction != "-" else ""))
+            elif kind == "vk":  # an older server: the type and direction on a line of their own
                 h, vtype, direction = rest.split(" ", 2)
                 if dump.signals and dump.signals[-1].code == int(h):
                     dump.signals[-1].vtype = vtype if vtype != "-" else ""
@@ -153,6 +178,10 @@ class LazyFst(wq.Wave):
                 built["clocks"].append([int(h), int(o), name])
         if not ended:
             raise wq.QueryError("%s stopped while listing the signals of %s" % (tool, path))
+        if built is not None and plan is None:
+            # too many signals to list and nowhere to index them (the viewer,
+            # or a dump on another machine): say so, with the scopes to pick from
+            raise TooManySignals(path, built)
         if built is not None:
             meta = plan.publish(built)
         elif plan is not None:
@@ -377,6 +406,11 @@ class LazyFst(wq.Wave):
         arithmetically; anything else is read in full."""
         start, end = self.start_time, self.end_time
         span = self.chunk
+        if getattr(self, "tool", "") == "fsdbsrv":
+            # the FSDB reader loads a signal whole for any read, so a window
+            # saves nothing there: one read of all the edges instead of a
+            # widening series of round trips (each a load) for a slow clock
+            span = end - start + 1
         while True:  # widen the window until it holds 64 edges or the dump
             first = self._rising(sig, start, min(end, start + span))
             if len(first) >= 64 or start + span >= end:
@@ -424,17 +458,20 @@ class RemoteFst(LazyFst):
     """An FST or FSDB on another machine, read through fstsrv or fsdbsrv
     running there, over ssh (remote.py)."""
 
-    def __init__(self, spec, tool="fstsrv", scope=None):
+    def __init__(self, spec, tool="fstsrv", scope=None, extra=()):
         import remote
 
         r, path = remote.parse(spec)
         self.remote = r
         for attempt in (0, 1):
             try:
-                super().__init__(spec, argv=r.srv_argv(path, tool, scope_args(scope)), tool=tool, scope=scope)
+                super().__init__(spec, argv=r.srv_argv(path, tool, scope_args(scope) + list(extra)), tool=tool,
+                                 scope=scope)
                 return
             except remote.RemoteError as exc:
                 raise wq.QueryError(str(exc))
+            except TooManySignals:
+                raise
             except wq.QueryError:
                 if attempt:
                     raise
@@ -460,7 +497,9 @@ def open_lazy(path, scope=None, index=True):
         if ext == ".fst":
             return RemoteFst(path, scope=scope)
         if ext == ".fsdb":
-            return RemoteFst(path, tool="fsdbsrv", scope=scope)
+            # no index on this side yet for a dump over there: a dump with
+            # too many signals to list stops short, naming its scopes
+            return RemoteFst(path, tool="fsdbsrv", scope=scope, extra=limit_args(scope))
         raise wq.QueryError("remote dumps are served for FST and FSDB only (convert or dump FST on the server)")
     if os.environ.get("WAVE_EAGER") == "1":
         return None
@@ -473,7 +512,18 @@ def open_lazy(path, scope=None, index=True):
             if index and not scope and nameindex.enabled() and not os.environ.get("WAVEVIEW_FSDBSRV"):
                 try:
                     return LazyFst(path, argv=argv, tool="fsdbsrv", plan=nameindex.Plan(path))
+                except TooManySignals:
+                    raise
                 except (OSError, ValueError, wq.QueryError) as exc:
                     sys.stderr.write("wavesource: no name index for %s (%s), listing the signals\n" % (path, exc))
-            return LazyFst(path, argv=argv, tool="fsdbsrv", scope=scope)
+            return LazyFst(path, argv=argv + limit_args(scope), tool="fsdbsrv", scope=scope)
     return None
+
+
+def limit_args(scope):
+    """fsdbsrv options that make a dump with too many signals to list say
+    so (with its scope summary) instead of listing: the names would go to
+    an index file, here nowhere. Not with a scope: that is the remedy."""
+    if scope or os.environ.get("WAVEVIEW_FSDBSRV") or not nameindex.enabled():
+        return []
+    return ["--index", "/dev/null", "--index-min", str(nameindex.min_signals())]

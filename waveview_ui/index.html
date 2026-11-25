@@ -104,6 +104,11 @@
   </div>
   <div id="op-list" tabindex="0"></div>
   <div class="op-row">
+    <label for="op-scope">Scope</label>
+    <input id="op-scope" spellcheck="false" list="op-scopes" placeholder="optional: A.B.C — only that part of the hierarchy (needed for a dump with millions of signals)" title="Only the signals below this scope are listed. A dump with more signals than can be listed at once asks for one and offers its first levels here">
+    <datalist id="op-scopes"></datalist>
+  </div>
+  <div class="op-row">
     <label for="op-rtl">RTL</label>
     <input id="op-rtl" spellcheck="false" placeholder="optional: filelist (.f), design .json / .xml, Verdi KDB or folder, for the source view">
     <button id="op-rtl-browse" title="Choose the filelist or folder from a listing">Browse…</button>

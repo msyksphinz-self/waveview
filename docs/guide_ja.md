@@ -301,7 +301,10 @@ Python も Verilator も C コンパイラも要らない。ダブルクリッ�
 **Open… ダイアログ**: ツールバーの Open… で This Mac / This PC か `~/.ssh/config` の
 ホストを選び、フォルダを辿ってダンプを開く。RTL 欄は手で書く他に、**Browse…** で
 同じ一覧からファイルリスト (.f / .vc / .flist) や design JSON / Verilator XML を
-選ぶか、**Use this folder** でフォルダ自体を指定できる。
+選ぶか、**Use this folder** でフォルダ自体を指定できる。**Scope** 欄に `A.B.C` を
+書くとその配下だけを読む。信号が多すぎるダンプ (既定 100 万以上、`WAVE_INDEX_MIN`
+で変更) は全部は列挙せず、「スコープを選んで」と返して第 1 階層を大きい順に候補に出す。
+コマンドラインなら `serve w.fsdb --scope A.B.C`。
 
 ## ブロック図: スコープの中身と接続
 

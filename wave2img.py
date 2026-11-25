@@ -99,6 +99,8 @@ class Signal:
     integer...) and direction a port direction (in, out, inout), both ""
     when the dump does not say."""
 
+    __slots__ = ("name", "width", "code", "index", "vtype", "direction")  # millions of these for a big dump
+
     def __init__(self, name, width, code, index, vtype="", direction=""):
         self.name = name
         self.width = width

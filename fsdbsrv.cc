@@ -414,8 +414,9 @@ static void emit_var(fsdbTreeCBDataVar *var)
     width_of[id] = w;
     n_listed++;
     if (!idx) {
-        fprintf(out, "var %u %u %s%s%s\n", (unsigned)id, w, path, path[0] ? "." : "", name);
-        fprintf(out, "vk %u %s %s\n", (unsigned)id, var_type_name(var->type), var_dir_name(var_direction(var, 0)));
+        /* the declared type and direction follow the name after a tab: one line per var */
+        fprintf(out, "var %u %u %s%s%s\t%s %s\n", (unsigned)id, w, path, path[0] ? "." : "", name,
+                var_type_name(var->type), var_dir_name(var_direction(var, 0)));
         return;
     }
     if (idx_after_pop || idx_since >= CHECKPOINT)

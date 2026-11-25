@@ -70,6 +70,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import wave2img as w2i  # noqa: E402
 import wavequery as wq  # noqa: E402
+import wavesource  # noqa: E402
 import remote  # noqa: E402
 import rtlindex  # noqa: E402
 import waverc  # noqa: E402
@@ -1624,13 +1625,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 raise wq.QueryError("paths on the server must be absolute")
             base = "ssh://%s%s" % (r.host, ":%s" % r.port if r.port else "")
             path, rtl = base + path, base + rtl if rtl else ""
+        scope = [s.strip() for s in (body.get("scope") or "").replace(",", " ").split() if s.strip()] or None
         if not Handler.opening.acquire(blocking=False):
             return self._send(409, {"error": "another dump is being opened"})
         try:
             try:
-                new = Hub(path, rtl=[rtl] if rtl else None)
+                new = Hub(path, rtl=[rtl] if rtl else None, scope=scope)
             except (OSError, subprocess.SubprocessError) as exc:
                 raise wq.QueryError("cannot open %s: %s" % (path, exc))
+            except wavesource.TooManySignals as exc:
+                # the dialog offers the scopes to pick from
+                return self._send(413, {"error": str(exc), "too_many": True, "signals": exc.signals,
+                                        "scopes": exc.scopes[:40]})
             old, Handler.hub = Handler.hub, new
             threading.Thread(target=new.watch, daemon=True).start()
             if Handler.on_open:

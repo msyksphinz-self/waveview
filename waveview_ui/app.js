@@ -38,7 +38,7 @@ async function api(path, body) {
   const opt = body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
   const r = await fetch(path, opt);
   const j = await r.json();
-  if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+  if (!r.ok) { const e = new Error(j.error || ('HTTP ' + r.status)); e.data = j; throw e; }
   return j;
 }
 
@@ -2302,6 +2302,7 @@ function opChosenHost() {
 }
 function opPick(entry, row) {
   OP.file = entry;
+  $('op-scope').value = opRemembered('scope:' + OP.host + ':' + entry.path);
   for (const el of $('op-list').children) el.classList.toggle('sel', el === row);
   $('op-open').disabled = OP.busy;
 }
@@ -2384,12 +2385,21 @@ async function opOpen() {
   $('op-open').disabled = true;
   opMsg(`Opening ${OP.file.name}…` + (OP.host ? ' The first time on a server also builds its reader.' : ''));
   try {
-    await api('/api/open', { host: OP.host, path: OP.file.path, rtl: $('op-rtl').value });
+    await api('/api/open', { host: OP.host, path: OP.file.path, rtl: $('op-rtl').value, scope: $('op-scope').value });
     opRemember('rtl:' + OP.host, $('op-rtl').value);
+    opRemember('scope:' + OP.host + ':' + OP.file.path, $('op-scope').value);
     location.reload();
   } catch (err) {
     OP.busy = false;
     $('op-open').disabled = false;
+    const d = err.data || {};
+    if (d.too_many) {
+      // too many signals to list: the first levels of the hierarchy, largest first, to pick from
+      $('op-scopes').replaceChildren(...d.scopes.map(([s, n]) => { const o = document.createElement('option'); o.value = s; o.label = `${n.toLocaleString()} signals`; return o; }));
+      opMsg(`${OP.file.name} has ${d.signals.toLocaleString()} signals: too many to list at once. Enter a scope (the field offers the largest first levels) and press Open again.`, true);
+      $('op-scope').focus();
+      return;
+    }
     opMsg(err.message, true);
   }
 }

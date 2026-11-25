@@ -19,9 +19,9 @@
  *     wavesrv 1
  *     timescale <exponent>              e.g. -12 for 1ps
  *     range <start> <end>
- *     var <handle> <width> <full.dotted.name>      once per variable
- *     vk <handle> <type> <dir>                      its declared type (wire, reg, logic...)
- *                                                   and port direction (in, out, inout), - if unknown
+ *     var <handle> <width> <full.dotted.name>[\t<type> <dir>]   once per variable; after the
+ *                                                   tab its declared type (wire, reg, logic...) and
+ *                                                   port direction (in, out, inout), - if unknown
  *     end
  * Commands and answers:
  *     read <t0> <t1> <h> [<h>...]
@@ -305,8 +305,9 @@ static void hierarchy(void)
                 break;
             if (h <= max_handle)
                 width_of[h] = hier->u.var.length;
-            printf("var %u %u %s%s%s\n", h, hier->u.var.length, path, path[0] ? "." : "", name);
-            printf("vk %u %s %s\n", h, var_type_name(typ), var_dir_name(hier->u.var.direction));
+            /* the declared type and direction follow the name after a tab: one line per var */
+            printf("var %u %u %s%s%s\t%s %s\n", h, hier->u.var.length, path, path[0] ? "." : "", name,
+                   var_type_name(typ), var_dir_name(hier->u.var.direction));
             break;
         }
         default:
