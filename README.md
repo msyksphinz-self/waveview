@@ -32,6 +32,11 @@ AI agent use together, built for remote development.
 - **Remote**: run the viewer on your desktop (Windows included) and read an
   FST that stays on the build server, over plain ssh; nothing to install
   there
+- **Millions of signals**: a dump too large to list keeps its names in an
+  index (written by the server next to the dump, brought over once for a
+  remote one); the tree opens a scope at a time, the filter searches the
+  index, and the rest of the viewer works through it. A 17-million-signal
+  FSDB opens in about ten seconds after the first time
 - **Text interface for agents**: `wavequery.py` answers info / list / get /
   table / changes / find with bounded output or JSON
 - **Debug views as files (`.wvrc`)**: the signals to look at, named cursors

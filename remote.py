@@ -182,6 +182,17 @@ class Remote:
             k = nl + 1 + n
         return out
 
+    def fetch_file(self, path, local, timeout=3600):
+        """Copy a file from the server to `local`, streamed (it may be
+        hundreds of MB: a name index)."""
+        with open(local, "wb") as fh:
+            proc = subprocess.Popen(self.argv("cat %s" % shlex.quote(path), compress=True), stdin=subprocess.DEVNULL,
+                                    stdout=fh, stderr=subprocess.PIPE)
+            _, err = proc.communicate(timeout=timeout)
+        if proc.returncode != 0:
+            raise RemoteError("%s: fetching %s failed (%d): %s" % (self, path, proc.returncode,
+                                                                   err.decode(errors="replace").strip()[-800:]))
+
     def put_file(self, path, data):
         """Write data to path on the server (directories made as needed)."""
         self.run("mkdir -p %s && cat > %s" % (shlex.quote(posixpath.dirname(path)), shlex.quote(path)), data=data)

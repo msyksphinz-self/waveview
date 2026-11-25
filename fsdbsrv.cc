@@ -21,6 +21,10 @@
  * Options, after the dump:
  *   --scope A.B.C   list only the variables below that scope (or that one
  *                   variable); may be given several times
+ *   --list-max N    list at most N variables (with --scope, usually): past
+ *                   that the rest are counted, and the header ends with the
+ *                   "index <variables> <scopes>" and "scope" summary lines
+ *                   below instead, so the client can ask for a smaller scope
  *   --index FILE --index-min N
  *                   a dump with N variable idcodes or more is not listed in
  *                   the protocol: its names go to FILE (the format is below)
@@ -112,6 +116,7 @@ static int no_tree;
 static uint64_t expect_scopes;
 static const char *index_path;
 static uint64_t index_min;
+static uint64_t list_max;    /* --list-max: past this many listed variables, count and summarise only */
 
 static int mode_agg;
 static uint64_t q_t0, q_t1;
@@ -157,6 +162,14 @@ static uint64_t n_listed;
 static FILE *idx;
 static long idx_since;     /* bytes since the last "@" line */
 static int idx_after_pop;
+/* the scopes file next to the names file: "<start> <end> <variables> <path>"
+ * for every scope holding BIG_SCOPE variables or more, so that the client
+ * finds a large scope and knows its size without reading through it */
+#define BIG_SCOPE 1000
+static FILE *idx_scopes;
+static uint64_t scope_start[MAX_DEPTH + 1]; /* offset of the "+" line of the scope at each depth */
+static uint64_t scope_vars[MAX_DEPTH + 1];  /* variables below the "+" scope at each depth so far */
+static int plus_at[MAX_DEPTH + 1];          /* depth of the innermost "+" scope at each depth */
 static uint64_t n_scopes;                /* "+" lines so far */
 static uint64_t ord_at[MAX_DEPTH + 1];   /* the scope number at each depth */
 static char kind_at[MAX_DEPTH + 1];      /* '+' or '*' of the name at each depth */
@@ -286,6 +299,11 @@ static void push_scope(const char *name, char kind)
     if (idx) {
         if (idx_since >= CHECKPOINT || (idx_after_pop && kind == '*'))
             idx_checkpoint();
+        if (depth < MAX_DEPTH) {
+            scope_start[depth + 1] = (uint64_t)ftello(idx);
+            scope_vars[depth + 1] = 0;
+            plus_at[depth + 1] = kind == '+' ? depth + 1 : plus_at[depth];
+        }
         idx_since += fprintf(idx, "%c%s\n", kind, name ? name : "");
         idx_after_pop = 0;
         if (kind == '+')
@@ -308,7 +326,7 @@ static void push_scope(const char *name, char kind)
                 match_depth = depth;
                 break;
             }
-    if (idx && depth <= SUMMARY_DEPTH)
+    if ((idx || list_max) && depth <= SUMMARY_DEPTH)
         bucket_at[depth] = new_bucket(path);
 }
 
@@ -318,6 +336,14 @@ static void pop_scope(void)
         if (idx) {
             idx_since += fprintf(idx, "-\n");
             idx_after_pop = 1;
+            if (depth <= MAX_DEPTH && kind_at[depth] == '+') {
+                uint64_t n = scope_vars[depth];
+                if (n >= BIG_SCOPE && idx_scopes)
+                    fprintf(idx_scopes, "%" PRIu64 " %" PRIu64 " %" PRIu64 " %s\n", scope_start[depth],
+                            (uint64_t)ftello(idx), n, path);
+                if (depth > 1)
+                    scope_vars[plus_at[depth - 1]] += n;
+            }
         }
         depth--;
         if (depth < MAX_DEPTH)
@@ -416,13 +442,18 @@ static void emit_var(fsdbTreeCBDataVar *var)
     n_listed++;
     if (!idx) {
         /* the declared type and direction follow the name after a tab: one line per var */
-        fprintf(out, "var %u %u %s%s%s\t%s %s\n", (unsigned)id, w, path, path[0] ? "." : "", name,
-                var_type_name(var->type), var_dir_name(var_direction(var, 0)));
+        if (!list_max || n_listed <= list_max)
+            fprintf(out, "var %u %u %s%s%s\t%s %s\n", (unsigned)id, w, path, path[0] ? "." : "", name,
+                    var_type_name(var->type), var_dir_name(var_direction(var, 0)));
+        if (list_max) /* past the cap the listing is a summary: count per scope */
+            buckets[bucket_at[depth < SUMMARY_DEPTH ? depth : SUMMARY_DEPTH]].n++;
         return;
     }
     if (idx_after_pop || idx_since >= CHECKPOINT)
         idx_checkpoint();
     idx_since += fprintf(idx, "%u %u %s\n", (unsigned)id, w, name);
+    if (depth <= MAX_DEPTH)
+        scope_vars[plus_at[depth]]++;
     buckets[bucket_at[depth < SUMMARY_DEPTH ? depth : SUMMARY_DEPTH]].n++;
     if (w == 1 && has_clock_name(name))
         note_clock(id, name);
@@ -696,6 +727,8 @@ int main(int argc, char **argv)
             index_path = argv[++i];
         else if (!strcmp(argv[i], "--index-min") && i + 1 < argc)
             index_min = strtoull(argv[++i], NULL, 10);
+        else if (!strcmp(argv[i], "--list-max") && i + 1 < argc)
+            list_max = strtoull(argv[++i], NULL, 10);
         else if (!strcmp(argv[i], "--no-tree") && i + 1 < argc) {
             no_tree = 1;
             expect_scopes = strtoull(argv[++i], NULL, 10);
@@ -704,7 +737,7 @@ int main(int argc, char **argv)
             bad = 1;
     }
     if (bad) {
-        fprintf(stderr, "usage: fsdbsrv <dump.fsdb> [--scope A.B.C]... [--index FILE --index-min N] [--no-tree N]\n");
+        fprintf(stderr, "usage: fsdbsrv <dump.fsdb> [--scope A.B.C]... [--list-max N] [--index FILE --index-min N] [--no-tree N]\n");
         return 2;
     }
     /* keep the protocol away from the library's log lines */
@@ -774,7 +807,16 @@ int main(int argc, char **argv)
         fprintf(idx, "waveview-names 1\n");
         bucket_at[0] = new_bucket("");
         idx_checkpoint();
+        char *scopes_path = (char *)malloc(strlen(index_path) + 8);
+        if (scopes_path) {
+            sprintf(scopes_path, "%s.scopes", index_path);
+            idx_scopes = fopen(scopes_path, "w");
+            free(scopes_path);
+        }
+        plus_at[0] = 0;
     }
+    if (!idx && list_max)
+        bucket_at[0] = new_bucket("");
     if (no_tree) {
         fsdb->ffrSetTreeCBFunc(scopes_cb, NULL);
         if (fsdb->ffrReadScopeTree() != FSDB_RC_SUCCESS || n_scope_off != expect_scopes) {
@@ -805,6 +847,10 @@ int main(int argc, char **argv)
             return 1;
         }
         idx = NULL;
+        if (idx_scopes) {
+            fclose(idx_scopes);
+            idx_scopes = NULL;
+        }
         fprintf(out, "index %" PRIu64 " %" PRIu64 "\n", n_listed, n_scopes);
         for (size_t i = 0; i < n_buckets; i++)
             if (buckets[i].n)
@@ -812,6 +858,13 @@ int main(int argc, char **argv)
         for (int i = 0; i < n_clocks; i++)
             if (clocks[i].id)
                 fprintf(out, "clock %u %" PRIu64 " %s\n", (unsigned)clocks[i].id, clocks[i].ord, clocks[i].name);
+    } else if (list_max && n_listed > list_max) {
+        /* more than the client would list: it gets the count and the scopes
+         * (those below --scope, since only listed variables were counted) */
+        fprintf(out, "index %" PRIu64 " %" PRIu64 "\n", n_listed, n_scopes);
+        for (size_t i = 0; i < n_buckets; i++)
+            if (buckets[i].n)
+                fprintf(out, "scope %" PRIu64 " %s\n", buckets[i].n, buckets[i].key);
     }
     fprintf(out, "end\n");
     fflush(out);

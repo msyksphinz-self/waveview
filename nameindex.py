@@ -37,7 +37,7 @@ sys.path.insert(0, HERE)
 import wave2img as w2i  # noqa: E402
 
 MAGIC = b"waveview-names 1\n"
-VERSION = 1
+VERSION = 2  # 2: a names.scopes file beside the names, with the large scopes
 DEFAULT_MIN = 1000000  # variable idcodes: below this a dump is listed in memory
 _STRUCT = re.compile(rb"^(?:([+*])(.*)|-)$", re.M)
 
@@ -89,6 +89,13 @@ class Plan:
         os.makedirs(self.tmp, exist_ok=True)
         return os.path.join(self.tmp, "names")
 
+    def index_arg(self):
+        """What the wave server is told to write the names to."""
+        return self.names_tmp()
+
+    def fetch(self):
+        """Bring the names file here, where the server wrote it elsewhere."""
+
     def publish(self, meta):
         """Make the index just written the one that is found next time."""
         meta = dict(meta, version=VERSION, dump=self.dump, stamp=self.stamp,
@@ -115,6 +122,47 @@ class Plan:
         shutil.rmtree(self.dir, ignore_errors=True)
 
 
+class RemotePlan(Plan):
+    """The index of a dump on another machine: the wave server writes the
+    names file there (its home, under .cache/waveview/index-tmp), it is
+    brought here once and kept like a local one, keyed on the dump's place,
+    size and modification time over there."""
+
+    def __init__(self, remote, path):
+        self.remote, self.path = remote, path
+        out = remote.run("stat -c '%%s %%Y' %s" % _quote(path), timeout=60).decode().split()
+        size, mtime = int(out[0]), int(out[1])
+        self.dump = "%s:%s" % (remote.host, path)
+        self.stamp = [size, mtime * 1000000000]
+        key = "%r|%s|%d|%d|%d" % (remote, path, size, mtime, VERSION)
+        self.dir = os.path.join(base_dir(), hashlib.sha1(key.encode()).hexdigest()[:20])
+        self.tmp = "%s.%d.tmp" % (self.dir, os.getpid())
+        self.server_tmp = ".cache/waveview/index-tmp/%s.%d.names" % (os.path.basename(self.dir), os.getpid())
+
+    def index_arg(self):
+        # a path relative to the server's home, where ssh commands start
+        self.remote.run("mkdir -p .cache/waveview/index-tmp", timeout=60)
+        return self.server_tmp
+
+    def fetch(self):
+        local = self.names_tmp()
+        self.remote.fetch_file(self.server_tmp, local)
+        try:  # the large scopes, when the server wrote any
+            self.remote.fetch_file(self.server_tmp + ".scopes", local + ".scopes")
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self.remote.run("rm -f %s %s" % (_quote(self.server_tmp), _quote(self.server_tmp + ".scopes")), timeout=60)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _quote(s):
+    import shlex
+
+    return shlex.quote(s)
+
+
 def _rx(pattern):
     """The regular expression of wave2img._matches: only * and ? are wild."""
     return re.compile("".join(".*" if c == "*" else "." if c == "?" else re.escape(c) for c in pattern), re.S)
@@ -134,6 +182,20 @@ class NameIndex:
         self.width_of = {}  # code -> width, of the signals handed out
         self.scope_of = {}  # code -> number of the scope that declares it
         self._exact = {}
+        # the large scopes, from the scopes file the server wrote next to the
+        # names: by the offset of their "+" line, and by path
+        self.big = {}  # offset -> (end offset, variables below)
+        self.big_path = {}  # path -> offset
+        try:
+            with open(os.path.join(dirpath, "names.scopes"), "rb") as fh:
+                for line in fh:
+                    f = line.rstrip(b"\n").split(b" ", 3)
+                    if len(f) == 4:
+                        self.big[int(f[0])] = (int(f[1]), int(f[2]))
+                        self.big_path[f[3].decode("latin-1")] = int(f[0])
+        except (OSError, ValueError):
+            pass
+        self._scope_lines = {"": len(MAGIC)}  # path -> offset of its "+" line
 
     def close(self):
         try:
@@ -300,10 +362,16 @@ class NameIndex:
             self._exact[name] = self.suffix(name, exact_only=True)[0]
         return self._exact[name]
 
-    def glob(self, pattern, limit=None):
-        """(the first `limit` signals matching the pattern, how many match)."""
+    def glob(self, pattern, limit=None, exact_total=True):
+        """(the first `limit` signals matching the pattern, how many match).
+        With exact_total False the search stops once `limit` hits are in
+        hand and the count is just that (a broad pattern over a large scope
+        would otherwise be read to the end for the count alone)."""
         rx = _rx(pattern)
         hits, total = [], 0
+
+        class Enough(Exception):
+            pass
 
         def take(code, width, name, at, scope):
             nonlocal total
@@ -312,18 +380,29 @@ class NameIndex:
             total += 1
             if limit is None or len(hits) < limit:
                 hits.append(self._signal(code, width, name, at, scope))
+            elif not exact_total:
+                raise Enough()
 
+        try:
+            known = self._glob(pattern, take, hits, limit)
+        except Enough:
+            return hits, total
+        return hits, known if known is not None else total
+
+    def _glob(self, pattern, take, hits, limit):
+        """Feeds the matches to take(); returns the total when it is known
+        without counting (every signal), else None."""
         if pattern and not pattern.strip("*"):  # everything: the count is known
             for sig in self.iter_all():
                 if limit is not None and len(hits) >= limit:
                     break
                 hits.append(sig)
-            return hits, self.count
+            return self.count
         piece = max(re.split(r"[*?.]", pattern), key=len)
         if not piece:
             for v in self._walk(len(MAGIC), whole=True):
                 take(*v)
-            return hits, total
+            return None
         # the piece is inside one scope name or one variable name: a scope
         # brings all it holds, a variable itself
         m = self.m
@@ -347,7 +426,7 @@ class NameIndex:
                     names, ords, _ = self._place(ls)
                     take(int(f[0]), int(f[1]), ".".join(names + [f[2].decode("latin-1")]), ls,
                          ords[-1] if ords else 0)
-        return hits, total
+        return None
 
     def suggest(self, name, limit=8):
         """Names whose leaf holds the leaf of `name`, shortest first."""
@@ -368,6 +447,136 @@ class NameIndex:
                 found.append(".".join(self._place(ls)[0] + [f[2].decode("latin-1")]))
         found.sort(key=lambda n: (len(n.split(".")[-1]), len(n), n))
         return found[:limit]
+
+    # -- one level of the tree, for a tree that opens as it is expanded ------
+
+    def _scope_line(self, scope):
+        """Offset of the "+leaf" line that opens `scope`, or None. The root
+        ("") is len(MAGIC): the file's first line follows the magic. A large
+        scope is known from the scopes file; the rest are searched for
+        within their parent, whose line is found first (and remembered)."""
+        if scope in self._scope_lines:
+            return self._scope_lines[scope]
+        if scope in self.big_path:
+            self._scope_lines[scope] = self.big_path[scope]
+            return self.big_path[scope]
+        parts = scope.split(".")
+        leaf = parts[-1].encode("latin-1", "replace")
+        parent = ".".join(parts[:-1])
+        # searched within the nearest ancestor that is a scope of its own (a
+        # struct in the path is not: its fields sit in the scope around it),
+        # then within wider ones: a scope and a struct may share a name, and
+        # only the full names of the place tell which the path means
+        m = self.m
+        needle = b"\n+" + leaf + b"\n"
+        found = None
+        anc = parent
+        searched_from = None
+        while found is None:
+            pls = self._scope_line(anc)
+            if pls is not None and pls != searched_from:
+                pend = self._scope_end(pls) if anc else len(m)
+                at = pls
+                while True:
+                    p = m.find(needle, at, pend)
+                    if p < 0:
+                        break
+                    ls = p + 1
+                    if ".".join(self._place(ls)[0]) == parent:
+                        found = ls
+                        break
+                    at = p + 1
+                searched_from = pls
+            if not anc:
+                break
+            anc = ".".join(anc.split(".")[:-1])
+        if len(self._scope_lines) > 50000:
+            self._scope_lines = {"": len(MAGIC)}
+        self._scope_lines[scope] = found
+        return found
+
+    def _scope_end(self, at):
+        """The offset after the scope opened by the "+" line at `at`: from
+        the scopes file for a large one, else by reading through it."""
+        hit = self.big.get(at)
+        return hit[0] if hit else self._skip(at)
+
+    def _count_vars(self, a, b):
+        """Variable lines in [a, b): the lines less the scope, struct, end
+        and checkpoint lines. a and b sit at line starts."""
+        m = self.m
+        if b <= a:
+            return 0
+        # counted in chunks (an mmap has no count, a slice is a copy): the
+        # chunks overlap by a byte so that a "\n+" across a boundary counts
+        lines = others = 0
+        chunk = 1 << 24
+        start = max(0, a - 1)
+        while start < b:
+            stop = min(b, start + chunk)
+            piece = m[start:stop]
+            lines += piece.count(b"\n", 1 if start == a - 1 and a > 0 else 0)
+            others += sum(piece.count(k) for k in (b"\n+", b"\n*", b"\n-", b"\n@"))
+            if stop >= b:
+                break
+            start = stop - 1
+        return max(0, lines - others)
+
+    def children(self, scope, limit=None, count=True):
+        """What is directly below a scope: ([(child name, child path, signals
+        below it)], [signals declared in the scope itself, structs flattened
+        as a.b]). None when the scope is not in the index. With a limit,
+        the children come largest first and the rest are summed into one
+        ("+N more", None, n). count=False leaves the counts 0 (fast)."""
+        ls = self._scope_line(scope)
+        if ls is None:
+            return None
+        m = self.m
+        end = len(m)
+        at = ls if not scope else m.find(b"\n", ls) + 1
+        # inside the scope: variables and structs are its own, a "+" is a
+        # child to count and skip, "-" at depth 0 closes it
+        ords = self._place(at)[1]
+        ordnum = ords[-1] if ords else 0
+        kids, sigs = [], []
+        prefix = []  # struct names entered
+        depth = 0
+        pre = scope + "." if scope else ""
+        while at < end:
+            le = m.find(b"\n", at)
+            if le < 0:
+                le = end
+            c = m[at] if le > at else 0
+            if 48 <= c <= 57:
+                f = m[at:le].split(b" ", 2)
+                if len(f) == 3:
+                    name = ".".join(prefix + [f[2].decode("latin-1")])
+                    sigs.append(self._signal(int(f[0]), int(f[1]), pre + name, at, ordnum))
+                at = le + 1
+            elif c == 43:  # + a child scope: count what it holds, skip it
+                name = m[at + 1:le].decode("latin-1")
+                big = self.big.get(at)
+                nxt = big[0] if big else self._skip(at)
+                n = big[1] if big else (self._count_vars(le + 1, nxt) if count else 0)
+                kids.append((name, pre + ".".join(prefix + [name]), n))
+                at = nxt
+            elif c == 42:  # * a struct: part of the names
+                prefix.append(m[at + 1:le].decode("latin-1"))
+                depth += 1
+                at = le + 1
+            elif c == 45:  # -
+                if depth == 0:
+                    break
+                depth -= 1
+                prefix.pop()
+                at = le + 1
+            else:
+                at = le + 1
+        if limit is not None and len(kids) > limit:
+            kids.sort(key=lambda k: -k[2])
+            rest = kids[limit:]
+            kids = kids[:limit] + [("+%d more" % len(rest), None, sum(k[2] for k in rest))]
+        return kids, sigs
 
     def clocks(self):
         """The clock candidates the wave server noted while listing."""
@@ -398,11 +607,11 @@ class ByName:
         self.names = names
 
     def get(self, name, default=None):
-        sig = self.names.exact(name)
+        sig = self.names.exact(name) if name else None
         return default if sig is None else sig
 
     def __contains__(self, name):
-        return self.names.exact(name) is not None
+        return bool(name) and self.names.exact(name) is not None
 
     def __getitem__(self, name):
         sig = self.names.exact(name)
@@ -515,6 +724,47 @@ def selftest(tmp):
                     failures.append("checkpoint %d: suffix %s" % (checkpoint, name))
         if idx.exact("tb.nosuch") is not None or idx.suffix("nosuch")[2]:
             failures.append("checkpoint %d: a name that is not there" % checkpoint)
+        # one level at a time: every scope's direct signals and child scopes
+        # with their counts, against the tree itself (a struct's fields belong
+        # to the scope around it; sibling scopes may share a name)
+        expect = {}  # scope path -> (sorted kid names with counts, sorted signal names)
+        seen = {}  # scope path -> how many scopes have it (siblings of one name)
+
+        def below(items):
+            return sum(1 if it[0] == "var" else below(it[2]) for it in items)
+
+        def gather(items, path, prefix, kids, sigs):
+            for it in items:
+                if it[0] == "var":
+                    sigs.append(path + ("." if path else "") + ".".join(prefix + [it[3]]))
+                elif it[0] == "struct":
+                    gather(it[2], path, prefix + [it[1]], kids, sigs)
+                else:
+                    kids.append((it[1], below(it[2])))
+                    sub = path + ("." if path else "") + ".".join(prefix + [it[1]])
+                    seen[sub] = seen.get(sub, 0) + 1
+                    sub_k, sub_s = [], []
+                    gather(it[2], sub, [], sub_k, sub_s)
+                    expect[sub] = (sorted(sub_k), sorted(sub_s))
+        root_k, root_s = [], []
+        gather(tree, "", [], root_k, root_s)
+        expect[""] = (sorted(root_k), sorted(root_s))
+        dup = {p for p, n in seen.items() if n > 1}
+        for scope, (want_kids, want_sigs) in expect.items():
+            if scope in dup or any(scope.startswith(d + ".") for d in dup):
+                continue  # two siblings of one name: which one the index means is not defined
+            got = idx.children(scope)
+            if got is None:
+                failures.append("checkpoint %d: children of %s not found" % (checkpoint, scope or "(root)"))
+                continue
+            kids, sigs = got
+            if sorted(s.name for s in sigs) != want_sigs:
+                failures.append("checkpoint %d: signals of %s (%d, want %d)" % (checkpoint, scope or "(root)", len(sigs), len(want_sigs)))
+            if sorted((k[0], k[2]) for k in kids) != want_kids:
+                failures.append("checkpoint %d: children of %s (%s, want %s)" % (checkpoint, scope or "(root)",
+                                                                                 sorted((k[0], k[2]) for k in kids), want_kids))
+        if idx.children("tb.nosuch") is not None:
+            failures.append("checkpoint %d: children of a scope that is not there" % checkpoint)
         for pat in ("*", "*1*", "*0]*", "*clk*", "tb.*", "*.u_core.*", "*rob.valid", "*gen[[]0]*", "*gen[0].c?k", "*u_?.q", "other*data",
                     "*.x", "t?.clk", "*nosuch*", "*.*.*.*.q"):
             want = [f for f in flat if w2i._matches(f[0], pat)]

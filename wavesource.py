@@ -95,23 +95,29 @@ class LazyFst(wq.Wave):
 
     lazy = True
 
-    def __init__(self, path, argv=None, tool="fstsrv", scope=None, plan=None):
+    def __init__(self, path, argv=None, tool="fstsrv", scope=None, plan=None, make_argv=None):
         """scope: list only the signals below these scopes. plan: a
         nameindex.Plan, for a dump whose names are kept on disk when there
-        are too many to hold (fsdbsrv only)."""
+        are too many to hold (fsdbsrv only). make_argv(extra): the command
+        line with extra server options added, where argv is not a plain
+        local one (over ssh the options must go inside the remote command)."""
         if argv is None:
             binary = w2i.build_fst_tool("fstsrv", verbose=True)
             if binary is None:
                 raise wq.QueryError("cannot build fstsrv.c (needs a C compiler and Verilator's FST library)")
             argv = [binary, path] + scope_args(scope)
+        if make_argv is None:
+            make_argv = lambda extra, base=argv: base + list(extra)  # noqa: E731
         self.path = path
         self.tool = tool
         self.names = None
         meta = plan.ready() if plan is not None else None
         if meta is not None:
-            argv = argv + ["--no-tree", str(meta["scope_count"])]
+            argv = make_argv(["--no-tree", str(meta["scope_count"])])
         elif plan is not None:
-            argv = argv + ["--index", plan.names_tmp(), "--index-min", str(nameindex.min_signals())]
+            argv = make_argv(["--index", plan.index_arg(), "--index-min", str(nameindex.min_signals())])
+        else:
+            argv = make_argv([])
         try:
             self._start(path, argv, tool, scope, plan, meta)
         except BaseException:
@@ -183,6 +189,7 @@ class LazyFst(wq.Wave):
             # or a dump on another machine): say so, with the scopes to pick from
             raise TooManySignals(path, built)
         if built is not None:
+            plan.fetch()  # a no-op for a local plan; brings the file from the server for a remote one
             meta = plan.publish(built)
         elif plan is not None:
             plan.discard()
@@ -458,15 +465,25 @@ class RemoteFst(LazyFst):
     """An FST or FSDB on another machine, read through fstsrv or fsdbsrv
     running there, over ssh (remote.py)."""
 
-    def __init__(self, spec, tool="fstsrv", scope=None, extra=()):
+    def __init__(self, spec, tool="fstsrv", scope=None, extra=(), index=False):
+        """index: a dump with too many signals to list keeps its names in
+        an index written over there and brought here once (RemotePlan)."""
         import remote
 
         r, path = remote.parse(spec)
         self.remote = r
+        plan = None
+        if index and tool == "fsdbsrv" and not scope and nameindex.enabled() and not os.environ.get("WAVEVIEW_REMOTE_FSDBSRV"):
+            try:
+                plan = nameindex.RemotePlan(r, path)
+                extra = ()
+            except (remote.RemoteError, ValueError, IndexError) as exc:
+                sys.stderr.write("wavesource: no name index for %s (%s)\n" % (spec, exc))
+        base = scope_args(scope) + list(extra)
         for attempt in (0, 1):
             try:
-                super().__init__(spec, argv=r.srv_argv(path, tool, scope_args(scope) + list(extra)), tool=tool,
-                                 scope=scope)
+                super().__init__(spec, argv=r.srv_argv(path, tool, base), tool=tool, scope=scope, plan=plan,
+                                 make_argv=lambda more: r.srv_argv(path, tool, base + list(more)))
                 return
             except remote.RemoteError as exc:
                 raise wq.QueryError(str(exc))
@@ -497,9 +514,11 @@ def open_lazy(path, scope=None, index=True):
         if ext == ".fst":
             return RemoteFst(path, scope=scope)
         if ext == ".fsdb":
-            # no index on this side yet for a dump over there: a dump with
-            # too many signals to list stops short, naming its scopes
-            return RemoteFst(path, tool="fsdbsrv", scope=scope, extra=limit_args(scope))
+            # with index: a dump with too many signals to list gets a name
+            # index written over there and brought here; without: it stops
+            # short, naming its scopes
+            return RemoteFst(path, tool="fsdbsrv", scope=scope, extra=limit_args(scope) if (scope or not index) else (),
+                             index=index)
         raise wq.QueryError("remote dumps are served for FST and FSDB only (convert or dump FST on the server)")
     if os.environ.get("WAVE_EAGER") == "1":
         return None
@@ -523,7 +542,10 @@ def open_lazy(path, scope=None, index=True):
 def limit_args(scope):
     """fsdbsrv options that make a dump with too many signals to list say
     so (with its scope summary) instead of listing: the names would go to
-    an index file, here nowhere. Not with a scope: that is the remedy."""
-    if scope or os.environ.get("WAVEVIEW_FSDBSRV") or not nameindex.enabled():
+    an index file, here nowhere. With a scope, a cap on the listing: a
+    scope can still hold millions."""
+    if os.environ.get("WAVEVIEW_FSDBSRV") or not nameindex.enabled():
         return []
+    if scope:
+        return ["--list-max", str(nameindex.min_signals())]
     return ["--index", "/dev/null", "--index-min", str(nameindex.min_signals())]

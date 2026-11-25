@@ -105,11 +105,16 @@ function applyState(st) {
 
 async function loadSignals() {
   S.meta = await api('/api/meta');
-  S.all = await api('/api/signals');
+  const got = await api('/api/signals');
+  // a dump with millions of signals keeps its names on the server's index:
+  // the tree then opens one scope at a time, the list's filter searches there
+  S.lazy = !Array.isArray(got);
+  S.all = S.lazy ? [] : got;
   S.width = new Map(S.all);
+  if (S.lazy) await ensureWidths(S.rows.map((r) => r.name));
   for (const r of S.rows) r.w = S.width.get(r.name) || 1;
-  buildTree();
-  $('st-dump').textContent = `${S.meta.dump}  ·  ${S.meta.signals} signals  ·  ${S.meta.timescale}`;
+  if (S.lazy) await buildTreeLazy(); else buildTree();
+  $('st-dump').textContent = `${S.meta.dump}  ·  ${S.meta.signals.toLocaleString()} signals${S.lazy ? ' (indexed)' : ''}  ·  ${S.meta.timescale}`;
   const base = S.meta.dump.split(/[\\/]/).pop();
   document.title = 'waveview · ' + base;
   $('title').textContent = base;
@@ -521,6 +526,37 @@ function findNode(path) {
   return n;
 }
 
+// -- the tree of a dump whose names live on the server's index: a level at a time
+async function buildTreeLazy() {
+  TREE = { name: '', path: '', kids: new Map(), sigs: [], open: true, loaded: false, count: S.meta.signals };
+  await loadLevel(TREE);
+  // open the first levels that have a single child, as GTKWave users expect
+  let n = TREE;
+  while (n.kids.size === 1 && n.sigs.length === 0) { n = [...n.kids.values()][0]; n.open = true; await loadLevel(n); }
+  if (!S.scope) S.scope = n === TREE ? null : n.path;
+  renderTree();
+}
+async function loadLevel(node) {
+  if (node.loaded) return;
+  let d;
+  try { d = await api('/api/scope?path=' + encodeURIComponent(node.path)); } catch (e) { toast(e.message); node.loaded = true; return; }
+  node.kids = new Map();
+  for (const [name, path, count] of d.scopes) node.kids.set(name, { name, path, kids: new Map(), sigs: [], open: false, loaded: false, count });
+  node.sigs = d.signals;
+  for (const [name, w] of d.signals) S.width.set(name, w);
+  node.more = d.more;
+  node.loaded = true;
+}
+async function ensureWidths(names) {
+  const want = names.filter((n) => !S.width.has(n));
+  if (!want.length) return;
+  try {
+    const got = await api('/api/widths', { names: want });
+    for (const n in got) S.width.set(n, got[n][0]);
+  } catch (e) { /* unknown names keep a width of 1 */ }
+}
+function fmtCount(n) { return n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(n); }
+
 function renderTree() {
   const box = $('tree');
   box.textContent = '';
@@ -529,11 +565,15 @@ function renderTree() {
       const d = document.createElement('div');
       d.className = 'tnode' + (k.path === S.scope ? ' on' : '');
       d.style.paddingLeft = (6 + depth * 14) + 'px';
-      const tw = document.createElement('span'); tw.className = 'tw'; tw.textContent = k.kids.size ? (k.open ? '▾' : '▸') : '';
+      const tw = document.createElement('span'); tw.className = 'tw';
+      const mayHaveKids = S.lazy && !k.loaded && k.count > 0;
+      tw.textContent = k.kids.size || mayHaveKids ? (k.open ? '▾' : '▸') : '';
       d.append(tw, document.createTextNode(k.name));
-      tw.onclick = (e) => { e.stopPropagation(); k.open = !k.open; renderTree(); };
-      d.onclick = () => { S.scope = k.path; S.pick.clear(); renderTree(); renderSigList(); };
-      d.ondblclick = () => { k.open = !k.open; renderTree(); };
+      if (S.lazy && k.count) { const c = document.createElement('span'); c.className = 'cnt'; c.textContent = fmtCount(k.count); d.append(c); }
+      const toggle = async () => { k.open = !k.open; if (k.open && S.lazy) await loadLevel(k); renderTree(); };
+      tw.onclick = (e) => { e.stopPropagation(); toggle(); };
+      d.onclick = async () => { S.scope = k.path; S.pick.clear(); if (S.lazy) await loadLevel(k); renderTree(); renderSigList(); };
+      d.ondblclick = toggle;
       d.oncontextmenu = (e) => treeMenu(e, k);
       d.title = k.path + '  (right-click: open its module or its instantiation in the source)';
       box.appendChild(d);
@@ -980,12 +1020,30 @@ function renderSigList() {
   const f = $('filter').value.trim();
   const node = findNode(S.scope) || TREE;
   if (!f) listed = node.sigs.slice();
-  else {
+  else if (S.lazy) {
+    // the names live on the server: ask it, and render when the answer comes
+    const prefix = S.scope ? S.scope + '.' : '';
+    const pat = /[*?]/.test(f) ? f : '*' + f + '*';
+    const seq = (S.filterSeq = (S.filterSeq || 0) + 1);
+    api('/api/names?pattern=' + encodeURIComponent(prefix + pat) + '&limit=500').then((r) => {
+      if (seq !== S.filterSeq) return;
+      listed = r.signals;
+      for (const [n, w] of listed) S.width.set(n, w);
+      renderSigListNow(f, prefix, r.total);
+    }).catch((e) => toast(e.message));
+    return;
+  } else {
     const prefix = S.scope ? S.scope + '.' : '';
     const re = /[*?]/.test(f) ? globRe(f) : null;
     const lf = f.toLowerCase();
     listed = S.all.filter(([n]) => n.startsWith(prefix) && (re ? re.test(n.slice(prefix.length)) || re.test(n.split('.').pop()) : n.toLowerCase().includes(lf)));
   }
+  renderSigListNow(f, S.scope ? S.scope + '.' : '', listed.length);
+}
+
+function renderSigListNow(f, prefix0, total) {
+  const box = $('siglist');
+  box.textContent = '';
   const LIMIT = 2000;
   const prefix = f ? (S.scope ? S.scope + '.' : '') : (S.scope ? S.scope + '.' : '');
   listed.slice(0, LIMIT).forEach(([n, w, kind], i) => {
@@ -1025,8 +1083,9 @@ function renderSigList() {
   }
 }
 
-function addRows(names, index) {
+async function addRows(names, index) {
   const have = new Set(S.rows.map((r) => r.name));
+  if (S.lazy) await ensureWidths(names);  // the names may come from a search, widths not yet known
   const add = names.filter((n) => !have.has(n)).map((n) => ({ name: n, radix: 'hex', w: S.width.get(n) || 1 }));
   if (!add.length) return;
   if (index == null) S.rows.push(...add); else S.rows.splice(index, 0, ...add);

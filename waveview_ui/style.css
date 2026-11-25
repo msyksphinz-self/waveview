@@ -60,6 +60,7 @@ input:focus, textarea:focus { border-color: var(--accent); }
 .tnode:hover, .sig:hover { background: var(--hover); }
 .tnode.on { background: var(--sel); }
 .tnode .tw { display: inline-block; width: 14px; color: var(--dim); }
+.tnode .cnt { color: var(--dim); font-size: 10px; margin-left: 6px; }
 .sig { padding: 1px 8px; white-space: nowrap; cursor: default; user-select: none; display: flex; justify-content: space-between; gap: 8px; }
 .sig.on { background: var(--sel); }
 .sig .w { color: var(--dim); }

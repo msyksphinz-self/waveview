@@ -116,7 +116,7 @@ class Hub:
         self.lock = threading.RLock()
         self.retired = False
         # the viewer walks the signal list (hierarchy, search): no name index
-        self.wave = wq.load(self.dump_path, scope=self.scope, index=False)
+        self.wave = wq.load(self.dump_path, scope=self.scope)
         self.gen = 1
         self.mtime = self._stamp()
         self.subscribers = []
@@ -831,10 +831,7 @@ class Hub:
         structs 'w_s' -> ['scope.w_s.f1', ...]."""
         pre = scope + "."
         out = {}
-        for s in self.wave.signals:
-            n = s.name
-            if not n.startswith(pre):
-                continue
+        for n in self._names_below(scope, mod):
             rest = n[len(pre):]
             comps = rest.split(".")
             # signals declared inside generate blocks: gen_x[0].w_y -> w_y
@@ -847,10 +844,48 @@ class Hub:
             out.setdefault(base, []).append(n)
         return out
 
+    def _names_below(self, scope, mod=None):
+        """Names of the dump signals under `scope`, as far as the source
+        pane needs them: all of them from the signal list; from a name
+        index, the scope's own and those of its generate blocks (an
+        instance's are its own business)."""
+        names = getattr(self.wave, "names", None)
+        pre = scope + "."
+        if names is None:
+            return [s.name for s in self.wave.signals if s.name.startswith(pre)]
+        got = names.children(scope, count=False)
+        if got is None:
+            return []
+        kids, sigs = got
+        out = [s.name for s in sigs]
+        for kname, kpath, _ in kids:
+            if kpath and mod is not None and rtlindex.Index._strip(kname) in mod.gen_labels:
+                sub = names.children(kpath, count=False)
+                if sub is not None:
+                    out += [s.name for s in sub[1]]
+                    # an instance inside the generate block: one name of it tells the scope exists
+                    out += [k[1] + "." for k in sub[0] if k[1]]
+        return out
+
     def child_scopes(self, scope, mod):
         """instance name -> dump scopes of it (through generate scopes)."""
         pre = scope + "."
         found = {}
+        names = getattr(self.wave, "names", None)
+        if names is not None:
+            # one level of the index, and one more through generate blocks
+            def visit(path, depth):
+                got = names.children(path, count=False)
+                for kname, kpath, _ in (got[0] if got else []):
+                    base = rtlindex.Index._strip(kname)
+                    if base in mod.instances:
+                        found.setdefault(base, [])
+                        if kpath not in found[base]:
+                            found[base].append(kpath)
+                    elif base in mod.gen_labels and depth < 4 and kpath:
+                        visit(kpath, depth + 1)
+            visit(scope, 0)
+            return found
         for s in self.wave.signals:
             if not s.name.startswith(pre):
                 continue
@@ -905,21 +940,41 @@ class Hub:
         kids = {}  # child -> {"signals", "sub", "own"}
         own = []   # (leaf, width, direction) of the signals directly in scope
         widths = {}
-        for s in self.wave.signals:
-            if not s.name.startswith(pre):
-                continue
-            rest = s.name[len(pre):]
-            comps = rest.split(".")
-            widths[rest] = s.width
-            if len(comps) == 1:
-                own.append((comps[0], s.width, s.direction))
-                continue
-            d = kids.setdefault(comps[0], {"signals": 0, "sub": set(), "own": []})
-            d["signals"] += 1
-            if len(comps) > 2:
-                d["sub"].add(comps[1])
-            else:
-                d["own"].append((comps[1], s.width, s.direction))
+        names = getattr(self.wave, "names", None)
+        if names is not None:
+            # from the index: this level and each child's own signals
+            got = names.children(scope, limit=120)
+            for kname, kpath, n in (got[0] if got else []):
+                if kpath is None:
+                    continue
+                d = kids.setdefault(kname, {"signals": n, "sub": set(), "own": []})
+                sub = names.children(kpath, count=False)
+                if sub is not None:
+                    d["sub"] = {k[0] for k in sub[0]}
+                    for s in sub[1]:
+                        leaf = s.name[len(kpath) + 1:]
+                        widths[kname + "." + leaf] = s.width
+                        d["own"].append((leaf, s.width, s.direction))
+            for s in (got[1] if got else []):
+                leaf = s.name[len(pre):]
+                widths[leaf] = s.width
+                own.append((leaf, s.width, s.direction))
+        else:
+            for s in self.wave.signals:
+                if not s.name.startswith(pre):
+                    continue
+                rest = s.name[len(pre):]
+                comps = rest.split(".")
+                widths[rest] = s.width
+                if len(comps) == 1:
+                    own.append((comps[0], s.width, s.direction))
+                    continue
+                d = kids.setdefault(comps[0], {"signals": 0, "sub": set(), "own": []})
+                d["signals"] += 1
+                if len(comps) > 2:
+                    d["sub"].add(comps[1])
+                else:
+                    d["own"].append((comps[1], s.width, s.direction))
         idx = self.src
         mod = None
         if idx is not None and scope:
@@ -1092,6 +1147,59 @@ class Hub:
                 "unlabelled": [(b["name"] + "/" + bd["name"]) for b in boxes.values() for bd in b["bundles"]
                                if bd["protocol"] is None and not bd["label"]]
                 + ["/" + bd["name"] for bd in ports if bd["protocol"] is None and not bd["label"]]}
+
+    # -- the hierarchy one level at a time, for a dump whose names live on disk
+
+    def scope_level(self, path):
+        """The scopes and signals directly below a scope: {"scopes": [[name,
+        path, signals below]], "signals": [[name, width, kind]]}. From the
+        name index when there is one, else from the signal list."""
+        path = (path or "").strip(".")
+        names = getattr(self.wave, "names", None)
+        if names is not None:
+            got = names.children(path, limit=300)
+            if got is None:
+                raise wq.QueryError("no scope %s in the dump" % path)
+            kids, sigs = got
+            # a dump may open the same top scope twice (VCS: the design and
+            # its $unit under one name): one entry, the counts added
+            merged = {}
+            for n, p, c in kids:
+                if p is None or (c == 0 and n.startswith("$")):  # $_fsdbgate_, $attribute_root: not design
+                    continue
+                if n in merged:
+                    merged[n][2] += c
+                else:
+                    merged[n] = [n, p, c]
+            return {"scopes": list(merged.values()),
+                    "more": sum(c for n, p, c in kids if p is None),
+                    "signals": [[s.name, s.width, s.kind] for s in sigs]}
+        pre = path + "." if path else ""
+        kids, sigs = {}, []
+        for s in self.wave.signals:
+            if not s.name.startswith(pre):
+                continue
+            comps = s.name[len(pre):].split(".")
+            if len(comps) == 1:
+                sigs.append([s.name, s.width, s.kind])
+            else:
+                kids[comps[0]] = kids.get(comps[0], 0) + 1
+        return {"scopes": [[n, pre + n, c] for n, c in kids.items()], "more": 0, "signals": sigs}
+
+    def name_search(self, pattern, limit=500):
+        """Signals matching a glob (or holding a word), for the list's
+        filter on a dump whose names live on disk."""
+        names = getattr(self.wave, "names", None)
+        if not pattern:
+            return {"signals": [], "total": 0}
+        pat = pattern if any(c in pattern for c in "*?") else "*" + pattern + "*"
+        if names is not None:
+            hits, total = names.glob(pat, limit=limit, exact_total=False)
+        else:
+            hits = [s for s in self.wave.signals if w2i._matches(s.name, pat)]
+            total = len(hits)
+            hits = hits[:limit]
+        return {"signals": [[s.name, s.width, s.kind] for s in hits], "total": total}
 
     # -- the whole hierarchy by size (treemap) -------------------------------
 
@@ -1394,7 +1502,7 @@ class Hub:
                 last_seen = sig
                 continue
             try:
-                wave = wq.load(self.dump_path, scope=self.scope, index=False)
+                wave = wq.load(self.dump_path, scope=self.scope)
             except Exception as exc:  # noqa: BLE001
                 sys.stderr.write("waveview: reload failed, will retry: %s\n" % exc)
                 last_seen = None
@@ -1535,7 +1643,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     return self._send(200, hub.public_state())
             if path == "/api/signals":
                 with hub.lock:
+                    if getattr(hub.wave, "names", None) is not None:
+                        # too many to send: the tree opens a scope at a time (/api/scope)
+                        return self._send(200, {"lazy": True, "count": len(hub.wave.signals)})
                     return self._send(200, [[s.name, s.width, s.kind] for s in hub.wave.signals])
+            if path == "/api/scope":
+                with hub.lock:
+                    return self._send(200, hub.scope_level(query.get("path", [""])[0]))
+            if path == "/api/names":
+                with hub.lock:
+                    return self._send(200, hub.name_search(query.get("pattern", [""])[0],
+                                                           int(query.get("limit", ["500"])[0])))
             if path == "/api/snapshot":
                 table = query.get("table", ["0"])[0] == "1"
                 with hub.lock:
@@ -1579,6 +1697,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._inbox(query)
             if method == "POST":
                 body = self._body()
+                if path == "/api/widths":
+                    with hub.lock:
+                        out = {}
+                        for n in body.get("names", [])[:5000]:
+                            s = hub.wave.by_name.get(n)
+                            if s is not None:
+                                out[n] = [s.width, s.kind]
+                        return self._send(200, out)
                 if path == "/api/cmd":
                     res = hub.apply(body["op"], body.get("args"), body.get("source", "ui"), body.get("client"))
                     return self._send(200, {"ok": True, "result": res, "version": hub.version})
